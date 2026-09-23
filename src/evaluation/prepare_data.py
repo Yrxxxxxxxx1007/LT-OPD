@@ -13,12 +13,14 @@ ROOT = Path(__file__).resolve().parent
 SOURCES = json.loads((ROOT / "benchmark_sources.json").read_text())
 
 
-def sha256(path):
+def file_identity(path):
     value = hashlib.sha256()
+    size = 0
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            size += len(block)
             value.update(block)
-    return value.hexdigest()
+    return size, value.hexdigest()
 
 
 def configuration(output, selected, textvqa_json=None, textvqa_images=None):
@@ -72,7 +74,8 @@ def prepare(output, selected, textvqa_json=None, textvqa_images=None):
                 hf_hub_download(repo_id=item["repo_id"], repo_type="dataset",
                                 revision=item["revision"], filename=entry["path"],
                                 local_dir=directory, cache_dir=cache / "huggingface")
-            if path.stat().st_size != entry["size"] or sha256(path) != entry["sha256"]:
+            size, digest = file_identity(path)
+            if size != entry["size"] or digest != entry["sha256"]:
                 raise ValueError(f"Benchmark file differs from its pinned source: {path}")
             files.append(str(path))
         if item["format"] == "hf_disk":
