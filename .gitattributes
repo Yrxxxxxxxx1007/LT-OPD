@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.pdf binary
+src/verl/models/transformers/qwen3_5.py -text
+src/verl/models/transformers/vision_token_compressor.py -text

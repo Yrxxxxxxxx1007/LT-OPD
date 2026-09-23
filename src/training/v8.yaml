@@ -1,0 +1,252 @@
+paths:
+  model: ???
+  data: ???
+  output: ???
+  training: ???
+max_model_len: 26624
+data:
+  train_files:
+  - ${paths.data}/train.parquet
+  val_files: null
+  max_prompt_length: 24576
+  max_response_length: 1024
+  truncation: error
+  filter_overlong_prompts: false
+  shuffle: false
+  seed: 20260824
+  train_batch_size: 80
+  train_drop_last: false
+  enforce_exact_train_batch_plan: true
+  dataloader_num_workers: 0
+  image_key: images
+  return_multi_modal_inputs: true
+  trust_remote_code: true
+  sampler:
+    class_path: pkg://verl.utils.dataset.vqa20k_sampler
+    class_name: VQA20KBalancedSampler
+  vqa20k_sampler_algorithm: sha256_bucket_permutation_cumulative_hamilton_fullimage_half_batch_rank_sharded_v1
+actor_rollout_ref:
+  model:
+    path: ${paths.model}
+    trust_remote_code: true
+    custom_chat_template_file: ${paths.training}/perception_chat_template_qwen35_answer_prefill.jinja
+    processor_min_pixels: 65536
+    processor_max_pixels: 16777216
+    override_config:
+      attn_implementation: flash_attention_2
+    use_remove_padding: false
+    use_fused_kernels: false
+    enable_gradient_checkpointing: true
+    enable_activation_offload: false
+    lora_rank: 0
+    lora_alpha: 0
+    target_modules: null
+    exclude_modules: null
+    lora_adapter_path: null
+    vision_token_projector:
+      enabled: false
+    train_native_visual_merger: true
+    vision_token_compressor:
+      enabled: true
+      data_manifest_path: ${paths.data}/manifest.json
+      data_manifest_schema: vision_opd_v8_vqa14k_fullimage_curriculum_materialization_manifest_v1
+      algorithm: qwen35_cdpruner_v1
+      method: cdpruner
+      paper_url: https://arxiv.org/abs/2506.10967
+      official_repo: Theia-4869/CDPruner
+      official_repo_revision: 9541616c40fcd5625de1cdb8ea6c33c129eb7864
+      adaptation_scope: qwen35_single_image_post_native_merger_pre_llm_matrix_free_conditional_dpp_exact_budget
+      original_method_reproduction_claim_allowed: false
+      route_schema_version: vision_opd_cdpruner_curriculum_route_v2
+      transport_key: dart_merge_routes
+      placement: post_native_merger_pre_llm
+      budget_policy: per_image_min_N_max_32_ceil_active_optimizer_step_retention_bps_N_v1
+      retention_ratio: 0.05
+      minimum_tokens_per_image: 32
+      conditional_objective: instruction_relevance_weighted_visual_diversity_greedy_dpp_matrix_free_fp32
+      kernel_jitter: 1.0e-06
+      relevance_epsilon: 1.0e-06
+      residual_epsilon: 1.0e-12
+      assignment_chunk_tokens: 2048
+      selector_dtype: float32
+      merge: none_pure_index_prune
+      position_policy: selected_original_mrope
+      query_policy: user_question_options_only_excluding_special_and_image_tokens
+      query_route_schema_version: vision_opd_route_query_v2
+      routing_autograd: detached_no_grad_fp32
+      query_conditioned: true
+      attention_conditioned: false
+      bbox_conditioned: false
+      deterministic: true
+      persistent_n_by_n_matrix_forbidden: true
+      relevance_fraction: null
+      candidate_multiplier: null
+      query_weight: null
+      attention_weight: null
+      bbox_weight: null
+      distance: null
+      distance_chunk_tokens: null
+      knn_k: null
+      center_score: null
+      assignment: greedy_conditional_dpp_stable_original_index_tie
+      reduction: none_pure_index_prune
+      curriculum:
+        enabled: true
+        schema_version: vision_opd_v8_visual_token_curriculum_v2
+        driver: completed_optimizer_steps_before_current_update
+        schedule_type: warmup_hold_raised_cosine_frozen_bps
+        total_optimizer_steps: 175
+        start_retention_bps: 2500
+        final_retention_bps: 500
+        warmup_hold_optimizer_steps: 14
+        final_plateau_start_completed_steps: 100
+        rounding_mode: round_half_up
+        retention_bps_vector_sha256: deea218dec57429ecfc439fe7aca1bc68ad72ef17af40f65b69e4947985642fa
+        minimum_tokens_per_image: 32
+        validation_control: forbidden_diagnostic_only
+        schedule_sha256: a02cbf6e99fa6dc002373656ee6d2492b55c29f968df3c9558b67252633f9a9b
+  actor:
+    strategy: fsdp
+    training_mode: full_parameter
+    freeze_vision_tower: false
+    data_loader_seed: 42
+    shuffle: false
+    fsdp_config:
+      use_orig_params: true
+      model_dtype: fp32
+      dtype: bfloat16
+      reshard_after_forward: false
+      param_offload: false
+      optimizer_offload: false
+    optim:
+      optimizer: AdamW
+      optimizer_impl: torch.optim
+      lr: 1.0e-06
+      vision_lr: 2.0e-07
+      merger_lr: 1.0e-06
+      betas:
+      - 0.9
+      - 0.999
+      eps: 1.0e-08
+      weight_decay: 0.01
+      clip_grad: 1.0
+      lr_scheduler_type: constant
+      lr_warmup_steps: 14
+      lr_warmup_steps_ratio: 0.0
+      lr_warmup_update_indexing: one_based_nonzero_v2
+      total_training_steps: 175
+      lr_scheduler_step_per_optimizer_step: true
+    grad_clip: 1.0
+    ppo_mini_batch_size: 80
+    ppo_epochs: 1
+    use_dynamic_bsz: true
+    vision_packing:
+      enabled: true
+      schema_version: vopd_dense_teacher_composite_cost_v1
+      max_cost_per_gpu: 1664327
+      max_trajectories_per_microbatch: 7
+      teacher_forward_multiplier: 2
+      teacher_micro_batch_size_per_gpu: 2
+      teacher_max_cost_per_microbatch: 90000
+      require_equal_size_micro_batches: true
+      raw_patch_weight: 1.0
+      image_overhead: 0.0
+    policy_loss:
+      loss_mode: vopd
+    loss_agg_mode: seq-mean-token-mean
+    use_kl_loss: false
+    calculate_entropy: false
+    self_distillation:
+      full_logit_distillation: true
+      distillation_topk: 100
+      distillation_add_tail: true
+      distillation_support_policy: student_teacher_topk_plus_rollout
+      alpha: 0.5
+      gamma: 1.0
+      is_clip: 2.0
+      teacher_always_on: true
+      teacher_model_source: fixed
+      teacher_model_path: ${paths.model}
+      teacher_regularization: fixed
+      teacher_update_rate: 0.0
+      teacher_update_interval: null
+      fixed_teacher_uses_ref_slot: true
+      teacher_visual_compression_mode: dense
+      teacher_image_key: teacher_images
+      reuse_rollout_teacher_inputs: false
+      fallback_to_policy_loss_on_missing_teacher: false
+      include_environment_feedback: false
+      max_reprompt_len: 25600
+      reprompt_truncation: error
+    checkpoint:
+      async_save: false
+  ref:
+    fsdp_config:
+      forward_only: true
+      model_dtype: bfloat16
+      dtype: bfloat16
+      reshard_after_forward: true
+      param_offload: false
+      optimizer_offload: false
+  rollout:
+    name: hf
+    n: 8
+    temperature: 1.0
+    top_p: 1.0
+    top_k: 0
+    response_length: 1024
+    semantic_stop_enabled: true
+    semantic_stop_string: </answer>
+    semantic_stop_include_tokens: true
+    semantic_stop_scan_response_only: true
+    semantic_stop_virtual_open: true
+    semantic_stop_transport_prefix: <answer>
+    max_model_len: 26624
+    dtype: bfloat16
+    tensor_model_parallel_size: 1
+    calculate_log_probs: true
+    hf_use_replicated_module: true
+    hf_replica_cpu_offload_between_phases: true
+    hf_active_sequence_compaction: true
+    hf_share_rollout_prefix: true
+    hf_rollout_group_balance: true
+    hf_dart_decode_max_prefill_cost: 70000
+    hf_preserve_cuda_cache: false
+    hf_dart_decode_batch_size: 80
+    log_prob_micro_batch_size_per_gpu: 1
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: false
+  use_kl_in_reward: false
+reward_model:
+  enable: false
+  use_reward_loop: false
+custom_reward_function:
+  path: ${paths.training}/zero_reward.py
+  name: compute_score
+trainer:
+  project_name: LT-OPD
+  experiment_name: v8
+  logger:
+  - console
+  - file
+  use_legacy_worker_impl: enable
+  n_gpus_per_node: 8
+  nnodes: 1
+  total_training_steps: 175
+  total_epochs: 1
+  resume_mode: disable
+  save_freq: 50
+  max_actor_ckpt_to_keep: 2
+  test_freq: -1
+  best_metric_key: null
+  val_before_train: false
+  default_local_dir: ${paths.output}/checkpoints
+  rollout_data_dir: null
+  dart_smoke_audit_dir: null
+  group_name: LT-OPD
+ray_kwargs:
+  ray_init:
+    num_cpus: 32
+    object_store_memory: 68719476736
+    include_dashboard: false

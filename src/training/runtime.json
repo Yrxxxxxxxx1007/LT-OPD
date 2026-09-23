@@ -1,0 +1,115 @@
+{
+  "schema_version": "vision_opd_ai4s_v8_fullimage_curriculum_runtime_optimization_v1",
+  "name": "hf_cdpruner_curriculum_replica_prefix_compact_decode80_v1",
+  "base_static_contract": {
+    "schema_version": "vision_opd_ai4s_v8_fullimage_curriculum_static_contract_v1",
+    "release_variant": "qwen35_vqa14k_cdpruner_fullimage_curriculum_fixed_teacher_hf_v1",
+    "file_sha256": "039151237016d32dfafa94613f789e9c266cb4ef8cfc57dd7b106d2eb05620da",
+    "canonical_sha256": "f1ba47ce478fea52a4453f48e8e0b0816ae586939ec778e95de944d84519e575"
+  },
+  "scientific_parameters_changed": false,
+  "sampling_distribution_changed": false,
+  "row_inventory_changed": false,
+  "optimizer_objective_changed": false,
+  "actor_profile": "M8",
+  "actor_max_trajectories_per_microbatch": 8,
+  "rollout": {
+    "backend": "hf",
+    "replica_dtype": "bfloat16",
+    "hf_use_replicated_module": true,
+    "hf_replica_cpu_offload_between_phases": true,
+    "hf_active_sequence_compaction": true,
+    "hf_share_rollout_prefix": true,
+    "hf_rollout_group_balance": true,
+    "hf_dart_decode_batch_size": 80,
+    "hf_dart_decode_max_prefill_cost": 84000,
+    "hf_preserve_cuda_cache": false,
+    "rolling_refill": false,
+    "standard_vllm": false,
+    "active_cross_rank_migration": false,
+    "uid_group_size": 8,
+    "cache_reorder_contract": "transformers_hybrid_cache_reorder_cache_v1",
+    "output_inverse_permutation_required": true
+  },
+  "teacher": {
+    "micro_batch_size_per_gpu_max": 2,
+    "max_cost_per_microbatch": 90000,
+    "rank_synchronous_cost_plan": true,
+    "dense_forward_passes_per_microbatch": 2
+  },
+  "effective_profiles": {
+    "M8": {
+      "decode_batch_size": 80,
+      "decode_max_prefill_cost": 84000,
+      "teacher_micro_batch_size": 2,
+      "teacher_max_cost": 90000
+    },
+    "M7": {
+      "decode_batch_size": 80,
+      "decode_max_prefill_cost": 70000,
+      "teacher_micro_batch_size": 2,
+      "teacher_max_cost": 90000
+    },
+    "M6": {
+      "decode_batch_size": 16,
+      "decode_max_prefill_cost": 70000,
+      "teacher_micro_batch_size": 1,
+      "teacher_max_cost": 90000
+    },
+    "M5": {
+      "decode_batch_size": 8,
+      "decode_max_prefill_cost": 70000,
+      "teacher_micro_batch_size": 1,
+      "teacher_max_cost": 90000
+    },
+    "T4": {
+      "decode_batch_size": 8,
+      "decode_max_prefill_cost": 70000,
+      "teacher_micro_batch_size": 1,
+      "teacher_max_cost": 90000
+    },
+    "T3": {
+      "decode_batch_size": 8,
+      "decode_max_prefill_cost": 70000,
+      "teacher_micro_batch_size": 1,
+      "teacher_max_cost": 90000
+    },
+    "B2": {
+      "decode_batch_size": 8,
+      "decode_max_prefill_cost": 70000,
+      "teacher_micro_batch_size": 1,
+      "teacher_max_cost": 90000
+    },
+    "S1": {
+      "decode_batch_size": 8,
+      "decode_max_prefill_cost": 70000,
+      "teacher_micro_batch_size": 1,
+      "teacher_max_cost": 90000
+    }
+  },
+  "oom_fallback": {
+    "enabled": true,
+    "restart_from_latest_atomic_checkpoint": true,
+    "transition_contract": "single_adjacent_profile_applies_bound_runtime_tuple_v1",
+    "adjacent_profile_ladder": [
+      "M8",
+      "M7",
+      "M6",
+      "M5",
+      "T4",
+      "T3",
+      "B2",
+      "S1"
+    ],
+    "max_pixels_immutable": true,
+    "scientific_parameters_immutable": true
+  },
+  "semantic_stop": {
+    "implementation": "prompt_owned_virtual_open_first_exact_close_termination_with_separate_strict_protocol_v3",
+    "virtual_open": true,
+    "transport_prefix": "<answer>",
+    "changes_completed_answer_tokens": false,
+    "retains_closing_delimiter": true,
+    "post_stop_action_mask_zero": true
+  }
+}

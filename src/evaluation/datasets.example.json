@@ -1,0 +1,31 @@
+{
+  "vstar": {
+    "source": "vstar/test-00000-of-00001.parquet"
+  },
+  "hrbench4k": {
+    "source": "hrbench/hr_bench_4k.parquet"
+  },
+  "mmmu": {
+    "source": "mmmu/validation-00000-of-00001.parquet"
+  },
+  "ocrbench": {
+    "source": "ocrbench/test-00000-of-00001.parquet"
+  },
+  "mmbench_circular": {
+    "source": "mmbench/dev-00000-of-00001.parquet"
+  },
+  "textvqa": {
+    "source": "textvqa/TextVQA_0.5.1_val.json",
+    "image_root": "textvqa/images"
+  },
+  "pope": {
+    "source": "pope"
+  },
+  "gqa": {
+    "source": "gqa/questions/testdev-00000-of-00001.parquet",
+    "image_source": "gqa/images/testdev-00000-of-00001.parquet"
+  },
+  "mme": {
+    "source": "mme"
+  }
+}

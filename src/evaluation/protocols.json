@@ -1,0 +1,106 @@
+{
+  "vstar": {
+    "display_name": "V* Bench",
+    "source_kind": "parquet",
+    "expected_count": 191,
+    "max_uncompressed_prompt_length": 8175,
+    "official_task": "vstar_bench",
+    "official_max_new_tokens": 16,
+    "until": [],
+    "metric": "accuracy",
+    "batch_size": 1
+  },
+  "hrbench4k": {
+    "display_name": "HR-Bench 4K",
+    "source_kind": "parquet",
+    "expected_count": 800,
+    "max_uncompressed_prompt_length": 15998,
+    "official_task": "hrbench4k",
+    "official_max_new_tokens": 1024,
+    "until": [],
+    "metric": "cycle-macro accuracy",
+    "batch_size": 1
+  },
+  "mmmu": {
+    "display_name": "MMMU",
+    "source_kind": "parquet",
+    "expected_count": 900,
+    "max_uncompressed_prompt_length": 5640,
+    "official_task": "mmmu_val_qwen",
+    "official_max_new_tokens": 128,
+    "until": [],
+    "metric": "author instance accuracy",
+    "batch_size": 1
+  },
+  "ocrbench": {
+    "display_name": "OCRBench",
+    "source_kind": "parquet",
+    "expected_count": 1000,
+    "max_uncompressed_prompt_length": 16312,
+    "official_task": "ocrbench",
+    "official_max_new_tokens": 128,
+    "until": [],
+    "metric": "author score / 1000",
+    "batch_size": 1
+  },
+  "mmbench_circular": {
+    "display_name": "MMBench Circular",
+    "source_kind": "parquet",
+    "expected_count": 4329,
+    "max_uncompressed_prompt_length": 671,
+    "official_task": "mmbench_en_dev",
+    "official_max_new_tokens": 1024,
+    "until": [
+      "ASSISTANT:"
+    ],
+    "metric": "CircularEval accuracy",
+    "batch_size": 1
+  },
+  "textvqa": {
+    "display_name": "TextVQA",
+    "source_kind": "textvqa_json",
+    "expected_count": 5000,
+    "max_uncompressed_prompt_length": 15596,
+    "official_task": "textvqa_val",
+    "official_max_new_tokens": 1024,
+    "until": [
+      "ASSISTANT:"
+    ],
+    "metric": "EvalAI VQA soft accuracy",
+    "batch_size": 4
+  },
+  "pope": {
+    "display_name": "POPE",
+    "source_kind": "hf_disk",
+    "expected_count": 9000,
+    "max_uncompressed_prompt_length": 446,
+    "official_task": "pope_full",
+    "official_max_new_tokens": 128,
+    "until": [],
+    "metric": "accuracy and F1",
+    "batch_size": 4
+  },
+  "gqa": {
+    "display_name": "GQA",
+    "source_kind": "gqa_join",
+    "expected_count": 12578,
+    "max_uncompressed_prompt_length": 458,
+    "official_task": "gqa",
+    "official_max_new_tokens": 16,
+    "until": [],
+    "metric": "author raw exact accuracy",
+    "batch_size": 4
+  },
+  "mme": {
+    "display_name": "MME",
+    "source_kind": "hf_disk",
+    "expected_count": 2374,
+    "official_max_new_tokens": 16,
+    "until": [],
+    "batch_size": 4,
+    "dataset": "lmms-lab-encoder/MME",
+    "revision": "d6c9023f017b564f7b3ccccf5348166bce8fdbcd",
+    "split": "test",
+    "metric": "author perception + cognition score"
+  }
+}
