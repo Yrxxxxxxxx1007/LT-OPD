@@ -14,12 +14,18 @@ import time
 from urllib.request import Request, urlopen
 
 
-def sha256(path: Path) -> str:
+def file_fingerprint(path: Path) -> tuple[int, str]:
     digest = hashlib.sha256()
+    size = 0
     with path.open('rb') as stream:
         for block in iter(lambda: stream.read(4 * 1024**2), b''):
             digest.update(block)
-    return digest.hexdigest()
+            size += len(block)
+    return size, digest.hexdigest()
+
+
+def sha256(path: Path) -> str:
+    return file_fingerprint(path)[1]
 
 
 def canonical(value) -> bytes:
@@ -34,7 +40,11 @@ def safe_relative(value: str) -> Path:
 
 
 def check_image(path: Path, item: dict) -> bool:
-    return path.is_file() and path.stat().st_size == item['size_bytes'] and sha256(path) == item['sha256']
+    try:
+        size, digest = file_fingerprint(path)
+    except (FileNotFoundError, IsADirectoryError):
+        return False
+    return size == item['size_bytes'] and digest == item['sha256']
 
 
 def extract_archive(archive: Path, output: Path, expected: dict[str, dict]) -> None:
@@ -128,7 +138,8 @@ def materialize(release: Path, output: Path, roots: list[Path], download_pixmo: 
     print('Verifying release files', flush=True)
     for name, detail in manifest['files'].items():
         path = release / safe_relative(name)
-        if path.stat().st_size != detail['bytes'] or sha256(path) != detail['sha256']:
+        size, digest = file_fingerprint(path)
+        if size != detail['bytes'] or digest != detail['sha256']:
             raise ValueError(f'Release file verification failed: {name}')
     items = [json.loads(line) for line in (release / 'media.jsonl').read_text().splitlines()]
     if len(items) != 14000 or len({x['sample_uid'] for x in items}) != 14000:
