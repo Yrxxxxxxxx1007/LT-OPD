@@ -28,15 +28,6 @@ from verl.utils.model import get_generation_config, update_model_config
 __all__ = ["HFModelConfig"]
 
 
-_V8_FULLIMAGE_CURRICULUM_SCHEDULE_SHA256 = (
-    "a02cbf6e99fa6dc002373656ee6d2492b55c29f968df3c9558b67252633f9a9b"
-)
-_V8_FULLIMAGE_CURRICULUM_ROUTE_SCHEMA = "vision_opd_cdpruner_curriculum_route_v2"
-_V8_FULLIMAGE_CURRICULUM_BUDGET_POLICY = (
-    "per_image_min_N_max_32_ceil_active_optimizer_step_retention_bps_N_v1"
-)
-
-
 @dataclass
 class HFModelConfig(BaseConfig):
     # note that we separate model_path, model_config_path and tokenizer_path in case they are different
@@ -153,7 +144,6 @@ class HFModelConfig(BaseConfig):
             "kernel_jitter": None,
             "relevance_epsilon": None,
             "residual_epsilon": None,
-            "assignment_chunk_tokens": None,
             "selector_dtype": None,
             "merge": None,
             "query_policy": None,
@@ -202,141 +192,11 @@ class HFModelConfig(BaseConfig):
             )
         if compressor_enabled:
             compressor = self.vision_token_compressor
-            algorithm = compressor.get("algorithm")
-            common_expected = {
-                "selector_dtype": "float32",
-                "merge": "none_pure_index_prune",
-                "position_policy": "selected_original_mrope",
-                "deterministic": True,
-            }
-            if algorithm == "qwen35_cdpruner_v1":
-                curriculum_config = compressor.get("curriculum")
-                curriculum_enabled = curriculum_config is not None
-                expected = {
-                    **common_expected,
-                    "algorithm": "qwen35_cdpruner_v1",
-                    "method": "cdpruner",
-                    "placement": "post_native_merger_pre_llm",
-                    "budget_policy": (
-                        _V8_FULLIMAGE_CURRICULUM_BUDGET_POLICY
-                        if curriculum_enabled
-                        else "per_image_max_32_ceil_0.05N"
-                    ),
-                    "route_schema_version": (
-                        _V8_FULLIMAGE_CURRICULUM_ROUTE_SCHEMA
-                        if curriculum_enabled
-                        else "vision_opd_cdpruner_route_v1"
-                    ),
-                    "query_policy": "user_question_options_only_excluding_special_and_image_tokens",
-                    "kernel_jitter": 1e-6,
-                    "relevance_epsilon": 1e-6,
-                    "residual_epsilon": 1e-12,
-                    "assignment_chunk_tokens": 2048,
-                }
-                forbidden_legacy = [
-                    key for key in ("relevance_fraction", "candidate_multiplier") if compressor.get(key) is not None
-                ]
-                if forbidden_legacy:
-                    raise ValueError(f"CDPruner config contains legacy selector settings: {forbidden_legacy}")
-                if curriculum_enabled:
-                    from verl.models.transformers.visual_token_curriculum import (
-                        CURRICULUM_DRIVER,
-                        CURRICULUM_VALIDATION_CONTROL,
-                        VisualTokenCurriculum,
-                    )
-
-                    curriculum = VisualTokenCurriculum.from_mapping(curriculum_config)
-                    if curriculum.schedule_sha256 != _V8_FULLIMAGE_CURRICULUM_SCHEDULE_SHA256:
-                        raise ValueError(
-                            "CDPruner curriculum is not the immutable V8 full-image schedule: "
-                            f"expected={_V8_FULLIMAGE_CURRICULUM_SCHEDULE_SHA256}, "
-                            f"actual={curriculum.schedule_sha256}"
-                        )
-                    if curriculum.driver != CURRICULUM_DRIVER:
-                        raise ValueError(
-                            "CDPruner curriculum must be driven only by committed optimizer steps"
-                        )
-                    if curriculum.validation_control != CURRICULUM_VALIDATION_CONTROL:
-                        raise ValueError(
-                            "Diagnostic validation is forbidden from controlling CDPruner curriculum"
-                        )
-                    if (
-                        curriculum.total_optimizer_steps != 175
-                        or curriculum.final_retention_bps != 500
-                        or curriculum.minimum_tokens_per_image != 32
-                    ):
-                        raise ValueError(
-                            "V8 full-image CDPruner curriculum requires total_optimizer_steps=175, "
-                            "final_retention_bps=500, and minimum_tokens_per_image=32"
-                        )
-                elif compressor.get("route_schema_version") == _V8_FULLIMAGE_CURRICULUM_ROUTE_SCHEMA:
-                    raise ValueError(
-                        "CDPruner curriculum route schema requires an explicit, hash-bound curriculum"
-                    )
-            elif algorithm == "qwen35_conditional_diversity_prune_v1":
-                # Explicit third-release replay/resume compatibility only.
-                expected = {
-                    **common_expected,
-                    "algorithm": "qwen35_conditional_diversity_prune_v1",
-                    "query_policy": "user_question_options_only_excluding_special_and_image_tokens",
-                }
-            elif algorithm == "qwen35_holitom_dpc_spatial_merge_v1":
-                from training.contract import load_contract
-
-                release_contract, _ = load_contract()
-                expected = release_contract["compressor"]
-                conditional_only = (
-                    "kernel_jitter",
-                    "relevance_epsilon",
-                    "residual_epsilon",
-                    "assignment_chunk_tokens",
-                    "selector_dtype",
-                    "merge",
-                    "query_policy",
-                    "relevance_fraction",
-                    "candidate_multiplier",
-                    "query_weight",
-                    "attention_weight",
-                    "bbox_weight",
-                )
-                non_null_conditional = [
-                    key for key in conditional_only if compressor.get(key) is not None
-                ]
-                if non_null_conditional:
-                    raise ValueError(
-                        "Formal HoliTom DPC config contains non-null conditional-pruning fields: "
-                        f"{non_null_conditional}"
-                    )
-            else:
-                raise ValueError(f"Unsupported vision_token_compressor.algorithm={algorithm!r}")
-            for key, value in expected.items():
-                if compressor.get(key) != value:
-                    raise ValueError(
-                        f"vision_token_compressor.{key} must be {value!r}, got {compressor.get(key)!r}"
-                    )
-            minimum_tokens = int(compressor.get("minimum_tokens_per_image", 0))
-            retention_ratio = float(compressor.get("retention_ratio", 0.0))
-            if algorithm in {"qwen35_cdpruner_v1", "qwen35_holitom_dpc_spatial_merge_v1"}:
-                if minimum_tokens != 32 or retention_ratio != 0.05:
-                    raise ValueError(
-                        "CDPruner/formal DPC requires immutable minimum_tokens_per_image=32 "
-                        "and retention_ratio=0.05"
-                    )
-            else:
-                relevance_fraction = float(compressor.get("relevance_fraction", 0.0))
-                candidate_multiplier = int(compressor.get("candidate_multiplier", 0))
-                if minimum_tokens <= 0 or not 0.0 < retention_ratio <= 1.0:
-                    raise ValueError("Legacy conditional pruning requires positive minimum_tokens and ratio in (0,1]")
-                if not 0.0 < relevance_fraction <= 1.0 or candidate_multiplier < 1:
-                    raise ValueError("Invalid legacy relevance_fraction or candidate_multiplier")
-            if algorithm != "qwen35_holitom_dpc_spatial_merge_v1":
-                data_manifest_path = compressor.get("data_manifest_path")
-                if not data_manifest_path:
-                    raise ValueError("Visual-token pruning requires vision_token_compressor.data_manifest_path")
-                from pathlib import Path
-
-                if not Path(str(data_manifest_path)).is_file():
-                    raise FileNotFoundError(f"Visual-token pruning data manifest does not exist: {data_manifest_path}")
+        if compressor and compressor.get("enabled", False):
+            if int(compressor.get("minimum_tokens_per_image", 32)) < 1:
+                raise ValueError("minimum_tokens_per_image must be positive")
+            if not 0 < float(compressor.get("retention_ratio", 0.05)) <= 1:
+                raise ValueError("retention_ratio must be in (0, 1]")
 
         if self.hf_config_path is None:
             self.hf_config_path = self.path

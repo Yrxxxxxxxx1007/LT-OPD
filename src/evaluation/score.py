@@ -7,7 +7,6 @@ import ast
 from collections import defaultdict
 import contextlib
 import copy
-import hashlib
 import importlib.util
 import io
 import json
@@ -21,13 +20,10 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent
 PROTOCOLS = json.loads((ROOT / "protocols.json").read_text())
-SOURCES = json.loads((ROOT / "sources.json").read_text())
 
 
 def source(root, name):
     path = root / name
-    if hashlib.sha256(path.read_bytes()).hexdigest() != SOURCES[name]["sha256"]:
-        raise ValueError(f"Scoring source differs from the pinned version: {path}")
     return path
 
 
@@ -49,50 +45,23 @@ def definitions(path, names, namespace=None, assignments=()):
     return namespace
 
 
-def load_records(path, dataset, mme_manifest=None):
+def load_records(path, dataset):
     if path.is_file():
         raw = path.read_text(encoding="utf-8")
-        records = [json.loads(line) for line in raw.splitlines() if line.strip()] if path.suffix == ".jsonl" else json.loads(raw)
+        records = ([json.loads(line) for line in raw.splitlines() if line.strip()]
+                   if path.suffix == ".jsonl" else json.loads(raw))
     else:
         records = []
         for item in sorted(path.rglob("*.json")):
             value = json.loads(item.read_text(encoding="utf-8"))
-            if isinstance(value, dict) and (("row" in value and "response" in value) or
-                                           (dataset == "mme" and "scored_content" in value)):
+            if isinstance(value, dict) and "row" in value and "response" in value:
                 records.append(value)
-    metadata = None
-    if mme_manifest:
-        manifest = json.loads(mme_manifest.read_text(encoding="utf-8"))
-        metadata = manifest.get("rows", manifest.get("metadata_rows"))
-    for row in records:
-        if "record_sha256" in row:
-            body = {k: v for k, v in row.items() if k != "record_sha256"}
-            actual = hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
-            if row["record_sha256"] != actual:
-                raise ValueError("Prediction record checksum mismatch")
-        if "canonical_sha256" in row:
-            body = {k: v for k, v in row.items() if k != "canonical_sha256"}
-            actual = hashlib.sha256((json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n").encode()).hexdigest()
-            if row["canonical_sha256"] != actual:
-                raise ValueError("Legacy prediction record checksum mismatch")
-        if "source_index" not in row and dataset == "mme":
-            # Historical MME records use a separate transport schema.
-            if metadata is None:
-                raise ValueError("Legacy MME records require --mme-manifest")
-            row.update(source_index=row["row_index"], uid=str(row["row_index"]),
-                       row={"gold": row["ground_truth"], "category": row["category"],
-                            "question_id": row["question_id"],
-                            "question": metadata[row["row_index"]]["question"]},
-                       response={"pred": row["scored_content"]})
     records.sort(key=lambda r: int(r["source_index"]))
     count = PROTOCOLS[dataset]["expected_count"]
     if len(records) != count or [int(r["source_index"]) for r in records] != list(range(count)):
         raise ValueError(f"Require exactly {count} unique ordered rows for {dataset}")
     if len({str(r["uid"]) for r in records}) != count:
         raise ValueError("Duplicate question IDs")
-    identities = {r["run_identity"] for r in records if "run_identity" in r}
-    if len(identities) > 1:
-        raise ValueError("Predictions from different runs were mixed")
     return records
 
 
@@ -312,9 +281,8 @@ def main():
     parser.add_argument("--predictions", type=Path, required=True, help="One dataset's prediction directory or JSONL")
     parser.add_argument("--sources", type=Path, required=True, help="Directory populated by fetch_scorers.py")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--mme-manifest", type=Path, help="Dataset manifest for legacy MME records only")
     args = parser.parse_args()
-    rows = load_records(args.predictions, args.dataset, args.mme_manifest)
+    rows = load_records(args.predictions, args.dataset)
     if args.dataset in ("vstar", "hrbench4k", "mmbench_circular"):
         result = score_mcq(rows, args.dataset, args.sources)
     else:

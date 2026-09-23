@@ -23,7 +23,6 @@ Public API:
 
 Default device policy:
     - If `device` is None:
-        * In pytest (detected by env "PYTEST_CURRENT_TEST"): use CPU.
         * Else if CUDA is available: use CUDA.
         * Else: use CPU.
     - You can override via env "VERL_FORCE_DEVICE" (e.g., "cuda:0" / "cpu").
@@ -57,7 +56,6 @@ def _resolve_device(explicit: Optional[torch.device | str]) -> torch.device:
     Priority:
       1) explicit argument
       2) VERL_FORCE_DEVICE env
-      3) pytest detection -> cpu
       4) cuda if available, else cpu
     """
     if explicit is not None:
@@ -66,10 +64,6 @@ def _resolve_device(explicit: Optional[torch.device | str]) -> torch.device:
     forced = os.getenv("VERL_FORCE_DEVICE")
     if forced:
         return torch.device(forced)
-
-    # Heuristic: pytest sets PYTEST_CURRENT_TEST
-    if "PYTEST_CURRENT_TEST" in os.environ:
-        return torch.device("cpu")
 
     return get_torch_device()
 

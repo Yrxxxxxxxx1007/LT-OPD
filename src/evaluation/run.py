@@ -35,24 +35,20 @@ def main():
                 for gpu in gpus:
                     while pending and sum(item["gpu"] == gpu for item in active) < args.workers_per_gpu:
                         rank = pending.pop(0)
-                        log_path = args.output_dir / dataset / f"rank{rank}.log"
-                        log_path.parent.mkdir(parents=True, exist_ok=True)
-                        log = log_path.open("a", encoding="utf-8")
                         command = [sys.executable, str(ROOT / "infer.py"), "--dataset", dataset,
                                    "--export-dir", str(args.export_dir.resolve()),
                                    "--data-config", str(args.data_config.resolve()),
                                    "--output-dir", str(args.output_dir.resolve()),
                                    "--rank", str(rank), "--world-size", str(world_size)]
                         environment = dict(os.environ, CUDA_VISIBLE_DEVICES=gpu)
-                        child = subprocess.Popen(command, env=environment, stdout=log, stderr=subprocess.STDOUT)
-                        active.append({"process": child, "log": log, "gpu": gpu, "rank": rank})
+                        child = subprocess.Popen(command, env=environment)
+                        active.append({"process": child, "gpu": gpu, "rank": rank})
                 for item in active[:]:
                     code = item["process"].poll()
                     if code is not None:
-                        item["log"].close()
                         active.remove(item)
                         if code:
-                            raise RuntimeError(f"{dataset} rank {item['rank']} exited {code}; see its log")
+                            raise RuntimeError(f"{dataset} rank {item['rank']} exited {code}")
                 if active:
                     time.sleep(1)
         finally:
@@ -60,7 +56,6 @@ def main():
                 if item["process"].poll() is None:
                     item["process"].terminate()
                 item["process"].wait()
-                item["log"].close()
         print(f"{dataset}: inference complete", flush=True)
 
 

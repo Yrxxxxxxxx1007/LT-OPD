@@ -48,15 +48,12 @@ actor_rollout_ref:
     train_native_visual_merger: true
     vision_token_compressor:
       enabled: true
-      data_manifest_path: ${paths.data}/manifest.json
-      data_manifest_schema: vision_opd_v8_vqa14k_fullimage_curriculum_materialization_manifest_v1
       algorithm: qwen35_cdpruner_v1
       method: cdpruner
       paper_url: https://arxiv.org/abs/2506.10967
       official_repo: Theia-4869/CDPruner
       official_repo_revision: 9541616c40fcd5625de1cdb8ea6c33c129eb7864
       adaptation_scope: qwen35_single_image_post_native_merger_pre_llm_matrix_free_conditional_dpp_exact_budget
-      original_method_reproduction_claim_allowed: false
       route_schema_version: vision_opd_cdpruner_curriculum_route_v2
       transport_key: dart_merge_routes
       placement: post_native_merger_pre_llm
@@ -67,7 +64,6 @@ actor_rollout_ref:
       kernel_jitter: 1.0e-06
       relevance_epsilon: 1.0e-06
       residual_epsilon: 1.0e-12
-      assignment_chunk_tokens: 2048
       selector_dtype: float32
       merge: none_pure_index_prune
       position_policy: selected_original_mrope
@@ -101,10 +97,7 @@ actor_rollout_ref:
         warmup_hold_optimizer_steps: 14
         final_plateau_start_completed_steps: 100
         rounding_mode: round_half_up
-        retention_bps_vector_sha256: deea218dec57429ecfc439fe7aca1bc68ad72ef17af40f65b69e4947985642fa
         minimum_tokens_per_image: 32
-        validation_control: forbidden_diagnostic_only
-        schedule_sha256: a02cbf6e99fa6dc002373656ee6d2492b55c29f968df3c9558b67252633f9a9b
   actor:
     strategy: fsdp
     training_mode: full_parameter
@@ -173,7 +166,6 @@ actor_rollout_ref:
       fixed_teacher_uses_ref_slot: true
       teacher_visual_compression_mode: dense
       teacher_image_key: teacher_images
-      reuse_rollout_teacher_inputs: false
       fallback_to_policy_loss_on_missing_teacher: false
       include_environment_feedback: false
       max_reprompt_len: 25600
@@ -229,7 +221,6 @@ trainer:
   experiment_name: v8
   logger:
   - console
-  - file
   use_legacy_worker_impl: enable
   n_gpus_per_node: 8
   nnodes: 1
@@ -243,10 +234,8 @@ trainer:
   val_before_train: false
   default_local_dir: ${paths.output}/checkpoints
   rollout_data_dir: null
-  dart_smoke_audit_dir: null
   group_name: LT-OPD
 ray_kwargs:
   ray_init:
     num_cpus: 32
-    object_store_memory: 68719476736
     include_dashboard: false

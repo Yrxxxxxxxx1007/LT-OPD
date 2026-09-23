@@ -84,26 +84,3 @@ def get_trajectory_tracker():
         hdfs_dir, verbose
     )
     return tracker
-
-
-if __name__ == "__main__":
-    # testing
-    os.environ["VERL_ENABLE_TRACKER"] = "1"
-    os.environ["VERL_TRACKER_HDFS_DIR"] = "~/debug/test"
-
-    @ray.remote
-    def process(iter):
-        data = {"obs": torch.randn(10, 20)}
-        dump_data(data, f"process_{iter}_obs")
-
-    ray.init()
-
-    output_lst = []
-
-    for i in range(10):
-        output_lst.append(process.remote(i))
-
-    out = ray.get(output_lst)
-
-    tracker = get_trajectory_tracker()
-    ray.get(tracker.wait_for_hdfs.remote())

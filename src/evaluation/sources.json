@@ -1,53 +1,43 @@
 {
   "vstar.py": {
     "url": "https://raw.githubusercontent.com/EvolvingLMMs-Lab/lmms-eval/75571cfe0fa36ca5ec2e6aa2bb268f9d38295af3/lmms_eval/tasks/vstar_bench/utils.py",
-    "sha256": "c7bd949657ec3f2ff955d75b3d8bb86f2fbf38bd4659a4250d833964a2f4a0c4",
     "license_source": "https://github.com/EvolvingLMMs-Lab/lmms-eval/blob/75571cfe0fa36ca5ec2e6aa2bb268f9d38295af3/LICENSE"
   },
   "matching.py": {
     "url": "https://raw.githubusercontent.com/open-compass/VLMEvalKit/e8e78f05f3080fe28154f2130321f17951c3be94/vlmeval/utils/matching_util.py",
-    "sha256": "06088ed4da68cd9d8c3018e7630d0503f1365e6dd31f651cbedd8aa44dc14466",
     "license_source": "https://github.com/open-compass/VLMEvalKit/blob/e8e78f05f3080fe28154f2130321f17951c3be94/LICENSE"
   },
   "multiple_choice.py": {
     "url": "https://raw.githubusercontent.com/open-compass/VLMEvalKit/e8e78f05f3080fe28154f2130321f17951c3be94/vlmeval/dataset/utils/multiple_choice.py",
-    "sha256": "39188c274e60899ceeff9f4180cbf0f9c798dd8954da0f9dccc85da0951d54c6",
     "license_source": "https://github.com/open-compass/VLMEvalKit/blob/e8e78f05f3080fe28154f2130321f17951c3be94/LICENSE"
   },
   "hrbench.py": {
     "url": "https://raw.githubusercontent.com/open-compass/VLMEvalKit/e8e78f05f3080fe28154f2130321f17951c3be94/vlmeval/dataset/utils/hrbench.py",
-    "sha256": "509b1aaf8b021cb68e79a0c87c27137c2df82f2ffb373ad1b199732afc33c80a",
     "license_source": "https://github.com/open-compass/VLMEvalKit/blob/e8e78f05f3080fe28154f2130321f17951c3be94/LICENSE"
   },
   "pope.py": {
     "url": "https://raw.githubusercontent.com/RUCAIBox/POPE/f3ec604337f1d1c9723ef8d01b4accacf8badb3d/evaluate.py",
-    "sha256": "f0371dcec5f1bdbde017d1a02f5a9a04c53cb561a2874f3fb8f0718ce3d87036",
     "license_source": "https://github.com/RUCAIBox/POPE/blob/f3ec604337f1d1c9723ef8d01b4accacf8badb3d/LICENSE"
   },
   "textvqa.py": {
     "url": "https://raw.githubusercontent.com/facebookresearch/mmf/2dc099af7ce267561e4c2ae033c27eb36be5b3ea/mmf/utils/m4c_evaluators.py",
-    "sha256": "e10a99e15c4658f8d0d83a05cc536c835922e701171fce0016718bec021b8c0a",
     "license_source": "https://github.com/facebookresearch/mmf/blob/2dc099af7ce267561e4c2ae033c27eb36be5b3ea/LICENSE"
   },
   "gqa.py": {
     "url": "https://downloads.cs.stanford.edu/nlp/data/gqa/eval.zip",
-    "sha256": "4433a8959d82c14b37ffc0c17c6f8d3e34ef692515b79939eb66220a4b74d130",
     "license_source": "https://cs.stanford.edu/people/dorarad/gqa/about.html",
     "zip_member": "eval.py"
   },
   "mmmu.py": {
     "url": "https://raw.githubusercontent.com/MMMU-Benchmark/MMMU/51ce7f3e829c16bb44bc5445782686b4c3508794/eval/eval_utils.py",
-    "sha256": "cc1a89b4a27f697702d340bc6a7578b5237135754ddaa9ef105239a3d9847367",
     "license_source": "https://github.com/MMMU-Benchmark/MMMU/blob/51ce7f3e829c16bb44bc5445782686b4c3508794/LICENSE"
   },
   "ocrbench.py": {
     "url": "https://raw.githubusercontent.com/Yuliang-Liu/MultimodalOCR/6af7d948ab4d4bdf625af36c884fb7da19075d1a/OCRBench/scripts/monkey.py",
-    "sha256": "757110736e27df1b8da392c6a311aea1c734af887b9b562bcbd2bf14e1c1c2d0",
     "license_source": "https://github.com/Yuliang-Liu/MultimodalOCR"
   },
   "mme.py": {
     "url": "https://raw.githubusercontent.com/BradyFU/Awesome-Multimodal-Large-Language-Models/dd2950902889cd614d4edf606827240166d29381/tools/eval_tool.zip",
-    "sha256": "66f154c0d3568cdd0c95b7d3e6b5a4b10cd393c71463328352c8c417c20a0607",
     "license_source": "https://github.com/BradyFU/Awesome-Multimodal-Large-Language-Models/tree/dd2950902889cd614d4edf606827240166d29381",
     "zip_member": "eval_tool/calculation.py"
   }

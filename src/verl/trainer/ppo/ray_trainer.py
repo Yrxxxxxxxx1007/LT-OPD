@@ -18,21 +18,17 @@ PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
-import hashlib
 import inspect
 import json
 import logging
 import os
 import re
-import time
 import uuid
-from collections.abc import Mapping
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from io import BytesIO
 from pprint import pprint
-from string import Template
 from typing import Any, Optional
 
 import numpy as np
@@ -63,7 +59,7 @@ from verl.trainer.ppo.metric_utils import (
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils import tensordict_utils as tu
-from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
+from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.chat_template import resolve_custom_chat_template
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
@@ -74,7 +70,6 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
-from verl.utils.torch_functional import postprocess_data
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
@@ -111,150 +106,6 @@ def _atomic_json(path: str, payload: dict) -> None:
     os.replace(temporary, target)
 
 
-def _audit_exp3_migrated_step301(metrics: dict, rollout_data_dir: str | None) -> None:
-    """Fail before step302 unless observable step301 behavior matches attempt1.
-
-    Attempt1 did not persist per-image route tensors or a post-step RNG
-    snapshot, so those fields are explicitly reported as unavailable rather
-    than being falsely claimed exact.  Discrete behavior, route aggregates,
-    optimizer state and learning rate remain exact.  Floating training
-    objectives are allowed at most 1% fresh-process numerical drift, while
-    rollout-correction diagnostics must stay inside an explicit safety
-    envelope.  Every observed difference is retained in the report.
-    """
-    report_path = os.environ.get("VERL_EXP3_RESUME_REPLAY_REPORT")
-    reference_root = os.environ.get("VERL_EXP3_RESUME_REPLAY_REFERENCE_OUTPUT")
-    if not report_path and not reference_root:
-        return
-    if not report_path or not reference_root:
-        raise RuntimeError("Exp3 resume replay requires report and reference output together")
-    if int(metrics.get("training/global_step", -1)) != 301:
-        return
-    if not rollout_data_dir:
-        raise RuntimeError("Exp3 resume replay requires rollout_data_dir")
-
-    reference_root = os.path.realpath(reference_root)
-    old_rollout_path = os.path.join(reference_root, "rollouts", "301.jsonl")
-    new_rollout_path = os.path.join(os.path.realpath(rollout_data_dir), "301.jsonl")
-    old_metrics_path = os.path.join(reference_root, "logs", "metrics.jsonl")
-    if not all(os.path.isfile(path) for path in (old_rollout_path, new_rollout_path, old_metrics_path)):
-        raise RuntimeError("Exp3 resume replay reference/current artifacts are missing")
-
-    def jsonl(path):
-        with open(path, encoding="utf-8") as handle:
-            return [json.loads(line) for line in handle if line.strip()]
-
-    old_rollouts, new_rollouts = jsonl(old_rollout_path), jsonl(new_rollout_path)
-    old_metric_rows = [row for row in jsonl(old_metrics_path) if int(row.get("step", -1)) == 301]
-    if len(old_metric_rows) != 1:
-        raise RuntimeError(f"Expected exactly one attempt1 step301 metric row, got {len(old_metric_rows)}")
-    old_metrics = old_metric_rows[0]["data"]
-
-    included_prefixes = (
-        "global_seqlen/", "compression/", "self_distillation/", "rollout_corr/",
-        "actor/", "response_length", "response/", "prompt_length/", "training/",
-    )
-    old_scientific = {key: value for key, value in old_metrics.items() if key.startswith(included_prefixes)}
-    new_scientific = {key: value for key, value in metrics.items() if key.startswith(included_prefixes)}
-    metric_differences = {}
-    for key in sorted(set(old_scientific) | set(new_scientific)):
-        old, new = old_scientific.get(key, "<MISSING>"), new_scientific.get(key, "<MISSING>")
-        if isinstance(old, (int, float)) and isinstance(new, (int, float)):
-            equal = bool(np.isfinite(old) and np.isfinite(new) and np.isclose(old, new, rtol=1e-7, atol=1e-8))
-        else:
-            equal = old == new
-        if not equal:
-            metric_differences[key] = {"attempt1": old, "resumed": new}
-
-    def digest(path):
-        result = hashlib.sha256()
-        with open(path, "rb") as handle:
-            for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
-                result.update(block)
-        return result.hexdigest()
-
-    bounded_objective_keys = {
-        "actor/grad_norm", "actor/pg_loss", "actor/vopd_loss", "actor/vopd_loss_weighted",
-        "self_distillation/raw_jsd_token_mean", "self_distillation/weighted_jsd_token_mean",
-        "self_distillation/support_unique_mean", "rollout_corr/training_log_ppl",
-        "rollout_corr/training_ppl", "rollout_corr/rollout_log_ppl", "rollout_corr/rollout_ppl",
-    }
-    diagnostic_keys = {
-        "rollout_corr/chi2_seq", "rollout_corr/chi2_token", "rollout_corr/k3_kl", "rollout_corr/kl",
-        "rollout_corr/log_ppl_abs_diff", "rollout_corr/log_ppl_diff", "rollout_corr/log_ppl_diff_max",
-        "rollout_corr/log_ppl_diff_min", "rollout_corr/ppl_ratio",
-    }
-    bounded_objective_differences = {
-        key: values for key, values in metric_differences.items()
-        if key in bounded_objective_keys and not np.isclose(values["attempt1"], values["resumed"], rtol=0.01, atol=1e-6)
-    }
-    unexpected_exact_differences = {
-        key: values for key, values in metric_differences.items()
-        if key not in bounded_objective_keys | diagnostic_keys
-    }
-    def diagnostic_safe(metric_key, values):
-        old, new = float(values["attempt1"]), float(values["resumed"])
-        return {
-            "rollout_corr/chi2_seq": max(abs(old), abs(new)) <= 0.5,
-            "rollout_corr/chi2_token": max(abs(old), abs(new)) <= 0.02,
-            "rollout_corr/k3_kl": max(abs(old), abs(new)) <= 0.01,
-            "rollout_corr/kl": max(abs(old), abs(new)) <= 0.01,
-            "rollout_corr/log_ppl_abs_diff": max(abs(old), abs(new)) <= 0.05,
-            "rollout_corr/log_ppl_diff": max(abs(old), abs(new)) <= 0.05,
-            "rollout_corr/log_ppl_diff_max": max(abs(old), abs(new)) <= 0.10,
-            "rollout_corr/log_ppl_diff_min": max(abs(old), abs(new)) <= 0.10,
-            "rollout_corr/ppl_ratio": 0.95 <= old <= 1.05 and 0.95 <= new <= 1.05,
-        }[metric_key]
-    unsafe_diagnostics = {
-        key: values for key, values in metric_differences.items()
-        if key in diagnostic_keys and not diagnostic_safe(key, values)
-    }
-
-    gates = {
-        "rollout_record_count_exact": len(old_rollouts) == len(new_rollouts) == 16,
-        "rollout_prompt_response_gold_stream_exact": old_rollouts == new_rollouts,
-        "scientific_metric_keyset_exact": old_scientific.keys() == new_scientific.keys(),
-        "bounded_training_objectives_within_one_percent": not bounded_objective_differences,
-        "categorical_route_and_optimizer_metrics_exact": not unexpected_exact_differences,
-        "rollout_correction_diagnostics_within_safety_envelope": not unsafe_diagnostics,
-        "dynamic_route_aggregate_exact": all(
-            old_scientific.get(key) == new_scientific.get(key)
-            for key in old_scientific if key.startswith("compression/")
-        ),
-        "optimizer_step_and_lr_exact": all(
-            old_scientific.get(key) == new_scientific.get(key)
-            for key in ("actor/optimizer_steps", "actor/lr")
-        ),
-    }
-    report = {
-        "schema_version": "vision_opd_exp3_resume_step301_replay_v1",
-        "passed": all(gates.values()),
-        "failed_gates": sorted(key for key, value in gates.items() if not value),
-        "gates": gates,
-        "reference_output": reference_root,
-        "reference_rollout_sha256": digest(old_rollout_path),
-        "resumed_rollout_sha256": digest(new_rollout_path),
-        "reference_metrics_sha256": digest(old_metrics_path),
-        "scientific_metric_count": len(old_scientific),
-        "metric_differences": metric_differences,
-        "failed_bounded_objective_differences": bounded_objective_differences,
-        "unexpected_exact_differences": unexpected_exact_differences,
-        "unsafe_rollout_correction_diagnostics": unsafe_diagnostics,
-        "comparison_tolerance": {
-            "discrete_and_contract_metrics": "exact",
-            "bounded_training_objectives": {"rtol": 0.01, "atol": 1e-6},
-            "rollout_correction_diagnostics": "explicit safety envelope; never used as equality evidence",
-        },
-        "limitations": {
-            "per_image_route_tensor": "unavailable in read-only attempt1 step301 artifacts",
-            "uid_field": "unavailable; exact rendered prompt stream is compared instead",
-            "post_step_rng_snapshot": "unavailable in read-only attempt1 step301 artifacts",
-            "dataloader_and_rng_at_step300": "loaded by existing exact checkpoint restore checks",
-        },
-    }
-    _atomic_json(report_path, report)
-    if not report["passed"]:
-        raise RuntimeError(f"Exp3 migrated step301 replay mismatch: {report['failed_gates']}")
 
 
 def _atomic_json_file(path: str, payload: dict[str, Any]) -> None:
@@ -266,223 +117,16 @@ def _atomic_json_file(path: str, payload: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-def _atomic_dataproto_file(path: str, payload: DataProto) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    temporary = f"{path}.{os.getpid()}.tmp"
-    payload.save_to_disk(temporary)
-    with open(temporary, "rb") as handle:
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
 
 
-def _exp3_rollout_exact_gates(expected: DataProto, actual: DataProto) -> dict[str, bool]:
-    expected_tensor_keys = set(expected.batch.keys())
-    actual_tensor_keys = set(actual.batch.keys())
-    tensors_exact = expected_tensor_keys == actual_tensor_keys and all(
-        _nested_exact_equal(expected.batch[key], actual.batch[key]) for key in expected_tensor_keys
-    )
-    required = {"prompts", "responses", "input_ids", "attention_mask", "position_ids", "rollout_log_probs"}
-    routes_expected = (expected.non_tensor_batch or {}).get("dart_merge_routes")
-    routes_actual = (actual.non_tensor_batch or {}).get("dart_merge_routes")
-    routes_exact = (
-        routes_expected is not None
-        and routes_actual is not None
-        and _nested_exact_equal(routes_expected, routes_actual)
-    )
-    return {
-        "rollout_tensor_inventory_exact": expected_tensor_keys == actual_tensor_keys,
-        "all_rollout_tensors_bitwise_exact": tensors_exact,
-        "required_rollout_tensors_present": required <= expected_tensor_keys,
-        "sampled_response_tokens_bitwise_exact": (
-            "responses" in expected_tensor_keys
-            and "responses" in actual_tensor_keys
-            and _nested_exact_equal(expected.batch["responses"], actual.batch["responses"])
-        ),
-        "behavior_logprobs_bitwise_exact": (
-            "rollout_log_probs" in expected_tensor_keys
-            and "rollout_log_probs" in actual_tensor_keys
-            and _nested_exact_equal(expected.batch["rollout_log_probs"], actual.batch["rollout_log_probs"])
-        ),
-        "cdpruner_routes_bitwise_exact": routes_exact,
-        "dart_routes_bitwise_exact": routes_exact,
-    }
 
 
-def _v6_rollout_exact_gates(expected: DataProto, actual: DataProto) -> dict[str, bool]:
-    """Exact next-rollout gates for the independent HoliTom-DPC schema."""
-
-    expected_tensor_keys = set(expected.batch.keys())
-    actual_tensor_keys = set(actual.batch.keys())
-    tensors_exact = expected_tensor_keys == actual_tensor_keys and all(
-        _nested_exact_equal(expected.batch[key], actual.batch[key]) for key in expected_tensor_keys
-    )
-    required = {"prompts", "responses", "input_ids", "attention_mask", "position_ids", "rollout_log_probs"}
-    expected_non_tensors = expected.non_tensor_batch or {}
-    actual_non_tensors = actual.non_tensor_batch or {}
-    routes_expected = expected_non_tensors.get("dpc_merge_routes")
-    routes_actual = actual_non_tensors.get("dpc_merge_routes")
-    routes_exact = (
-        routes_expected is not None
-        and routes_actual is not None
-        and _nested_exact_equal(routes_expected, routes_actual)
-    )
-    return {
-        "rollout_tensor_inventory_exact": expected_tensor_keys == actual_tensor_keys,
-        "all_rollout_tensors_bitwise_exact": tensors_exact,
-        "required_rollout_tensors_present": required <= expected_tensor_keys,
-        "sampled_response_tokens_bitwise_exact": (
-            "responses" in expected_tensor_keys
-            and "responses" in actual_tensor_keys
-            and _nested_exact_equal(expected.batch["responses"], actual.batch["responses"])
-        ),
-        "behavior_logprobs_bitwise_exact": (
-            "rollout_log_probs" in expected_tensor_keys
-            and "rollout_log_probs" in actual_tensor_keys
-            and _nested_exact_equal(expected.batch["rollout_log_probs"], actual.batch["rollout_log_probs"])
-        ),
-        "dpc_merge_routes_bitwise_exact": routes_exact,
-        "legacy_dart_routes_absent": (
-            "dart_merge_routes" not in expected_non_tensors
-            and "dart_merge_routes" not in actual_non_tensors
-        ),
-    }
 
 
-def _v8_rollout_exact_gates(expected: DataProto, actual: DataProto) -> dict[str, bool]:
-    """Exact next-rollout gates for V8 CDPruner plus its virtual-open protocol.
-
-    V8 deliberately retains ``dart_merge_routes`` as the public transport key,
-    but every route carries the CDPruner identity triple and a UID-bound query
-    audit.  Comparing the complete nested route payload therefore covers the
-    selected indices, assignment, original M-RoPE anchors, semantic query, and
-    sample binding without weakening the historical V6 checker.
-    """
-
-    expected_tensor_keys = set(expected.batch.keys())
-    actual_tensor_keys = set(actual.batch.keys())
-    tensors_exact = expected_tensor_keys == actual_tensor_keys and all(
-        _nested_exact_equal(expected.batch[key], actual.batch[key]) for key in expected_tensor_keys
-    )
-    required = {"prompts", "responses", "input_ids", "attention_mask", "position_ids", "rollout_log_probs"}
-    expected_non_tensors = expected.non_tensor_batch or {}
-    actual_non_tensors = actual.non_tensor_batch or {}
-    routes_expected = expected_non_tensors.get("dart_merge_routes")
-    routes_actual = actual_non_tensors.get("dart_merge_routes")
-    routes_exact = (
-        routes_expected is not None
-        and routes_actual is not None
-        and _nested_exact_equal(routes_expected, routes_actual)
-    )
-
-    def exact_non_tensor(key: str) -> bool:
-        return (
-            key in expected_non_tensors
-            and key in actual_non_tensors
-            and _nested_exact_equal(expected_non_tensors[key], actual_non_tensors[key])
-        )
-
-    return {
-        "rollout_tensor_inventory_exact": expected_tensor_keys == actual_tensor_keys,
-        "all_rollout_tensors_bitwise_exact": tensors_exact,
-        "required_rollout_tensors_present": required <= expected_tensor_keys,
-        "sampled_response_tokens_bitwise_exact": (
-            "responses" in expected_tensor_keys
-            and "responses" in actual_tensor_keys
-            and _nested_exact_equal(expected.batch["responses"], actual.batch["responses"])
-        ),
-        "behavior_logprobs_bitwise_exact": (
-            "rollout_log_probs" in expected_tensor_keys
-            and "rollout_log_probs" in actual_tensor_keys
-            and _nested_exact_equal(expected.batch["rollout_log_probs"], actual.batch["rollout_log_probs"])
-        ),
-        "cdpruner_routes_and_query_audits_bitwise_exact": routes_exact,
-        "archived_holitom_routes_absent": (
-            "dpc_merge_routes" not in expected_non_tensors
-            and "dpc_merge_routes" not in actual_non_tensors
-        ),
-        "semantic_stop_status_bitwise_exact": exact_non_tensor("rollout_protocol_status"),
-        "semantic_stop_reason_bitwise_exact": exact_non_tensor("rollout_stop_reason"),
-        "virtual_open_transport_prefix_bitwise_exact": exact_non_tensor(
-            "rollout_response_transport_prefix"
-        ),
-    }
 
 
-def _post_checkpoint_next_curriculum_state(curriculum: Any, checkpoint_step: int) -> dict[str, Any]:
-    """Return the curriculum state for the first rollout after checkpoint S.
-
-    Checkpoint ``S`` is written only after optimizer update ``S`` commits, so
-    the next rollout is driven by ``completed_optimizer_steps=S``.  Keeping
-    this boundary in one pure helper prevents resume evidence from silently
-    replaying update S's pre-update state ``S-1``.
-    """
-
-    if isinstance(checkpoint_step, bool) or not isinstance(checkpoint_step, int):
-        raise TypeError("checkpoint_step must be an integer")
-    if checkpoint_step <= 0:
-        raise ValueError("checkpoint_step must be positive")
-    return curriculum.runtime_state(checkpoint_step)
 
 
-def _require_v6_single_finite_actor_update(
-    actor_metrics: Mapping[str, Any], *, require_nonzero_lr: bool = False
-) -> None:
-    """Fail closed unless a formal V6 outer step performed one finite update.
-
-    Formal V6 fixes ``ppo_epochs=1`` and the optimizer mini-batch to the full
-    global batch, so every consumed outer batch must produce exactly one
-    optimizer step.  ``DataParallelPPOActor`` deliberately skips an optimizer
-    step after a non-finite gradient norm; without this controller-side gate,
-    the dataloader and global step could still advance and silently undertrain.
-    """
-
-    required_finite_metrics = (
-        "actor/grad_norm",
-        "actor/vopd_loss",
-        "actor/vopd_loss_weighted",
-        "self_distillation/raw_jsd_token_mean",
-        "self_distillation/weighted_jsd_token_mean",
-    )
-    for key in required_finite_metrics:
-        if key not in actor_metrics:
-            raise RuntimeError(f"Formal V6 actor update did not report required metric {key!r}")
-        value = actor_metrics[key]
-        if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.number)):
-            raise TypeError(
-                f"Formal V6 actor metric {key!r} must be a real scalar, "
-                f"got {type(value).__name__}"
-            )
-        if not np.isfinite(float(value)):
-            raise FloatingPointError(f"Formal V6 actor metric {key!r} is non-finite: {value!r}")
-
-    optimizer_steps = actor_metrics.get("actor/optimizer_steps")
-    if isinstance(optimizer_steps, (bool, np.bool_)) or not isinstance(
-        optimizer_steps, (int, float, np.number)
-    ):
-        raise RuntimeError(
-            "Formal V6 actor update must report numeric 'actor/optimizer_steps'; "
-            f"got {optimizer_steps!r}"
-        )
-    if not np.isfinite(float(optimizer_steps)) or float(optimizer_steps) != 1.0:
-        raise RuntimeError(
-            "Formal V6 requires exactly one successful optimizer update for every consumed "
-            f"outer batch; got actor/optimizer_steps={optimizer_steps!r}. Training is stopped "
-            "before the global step, sampler, log, or checkpoint can advance."
-        )
-    if require_nonzero_lr:
-        nonzero_steps = actor_metrics.get("actor/nonzero_lr_optimizer_steps")
-        if isinstance(nonzero_steps, (bool, np.bool_)) or not isinstance(
-            nonzero_steps, (int, float, np.number)
-        ):
-            raise RuntimeError(
-                "V7 actor update must report numeric 'actor/nonzero_lr_optimizer_steps'; "
-                f"got {nonzero_steps!r}"
-            )
-        if not np.isfinite(float(nonzero_steps)) or float(nonzero_steps) != 1.0:
-            raise RuntimeError(
-                "V7 requires exactly one optimizer update with finite, strictly positive "
-                f"learning rates in every parameter group; got {nonzero_steps!r}"
-            )
 
 logger = logging.getLogger(__name__)
 
@@ -844,70 +488,9 @@ class RayPPOTrainer:
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
-    def _is_ai4s_v6_full_parameter(self) -> bool:
-        """Return whether this trainer is running the fail-closed V6 contract."""
 
-        root = getattr(self.config, "actor_rollout_ref", None)
-        if root is None and isinstance(self.config, Mapping):
-            root = self.config.get("actor_rollout_ref")
-        if root is None:
-            return False
-        actor = getattr(root, "actor", None)
-        if actor is None and isinstance(root, Mapping):
-            actor = root.get("actor")
-        getter = getattr(actor, "get", None)
-        return callable(getter) and getter("training_mode", "legacy") == "full_parameter"
 
-    def _formal_compressor_algorithm(self) -> Optional[str]:
-        """Return the selected full-parameter compressor identity.
 
-        The historical helper above intentionally remains the admission gate for
-        the V6/V7/V8 full-parameter checkpoint machinery.  It must not, however,
-        be used as a method discriminator: V8 is also full-parameter but carries
-        CDPruner routes rather than HoliTom-DPC routes.  Resolve the algorithm
-        from both Hydra and the selected immutable contract and fail closed if
-        those two independently projected identities differ.
-        """
-
-        if not self._is_ai4s_v6_full_parameter():
-            return None
-        compressor = self.config.actor_rollout_ref.model.get("vision_token_compressor", {})
-        configured = compressor.get("algorithm")
-        from training.contract import load_contract
-
-        contract, _ = load_contract()
-        contracted = contract["compressor"]["algorithm"]
-        if configured != contracted:
-            raise RuntimeError(
-                "Full-parameter compressor algorithm differs from the selected static contract: "
-                f"configured={configured!r}, contracted={contracted!r}"
-            )
-        return str(contracted)
-
-    def _is_ai4s_v8_cdpruner(self) -> bool:
-        return self._formal_compressor_algorithm() == "qwen35_cdpruner_v1"
-
-    def _reject_v6_legacy_audit_controls(self) -> None:
-        """Prevent a formal eight-rank run from entering archived Exp3 gates."""
-
-        if not self._is_ai4s_v6_full_parameter():
-            return
-        legacy_environment = sorted(
-            name
-            for name in (
-                "VERL_EXP3_FRESH_LOAD_AUDIT_DIR",
-                "VERL_EXP3_NEXT_ROLLOUT_AUDIT_DIR",
-                "VERL_EXP3_GATE_PARAMETER_AUDIT_DIR",
-                "VERL_EXP3_RESUME_REPLAY_REPORT",
-                "VERL_EXP3_RESUME_REPLAY_REFERENCE_OUTPUT",
-            )
-            if os.environ.get(name)
-        )
-        if legacy_environment:
-            raise RuntimeError(
-                "Formal V6 forbids archived four-rank Exp3 audit controls: "
-                f"{legacy_environment}"
-            )
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -983,16 +566,6 @@ class RayPPOTrainer:
             rollout_n = int(self.config.actor_rollout_ref.rollout.n)
             if rollout_n <= 0:
                 raise ValueError("enforce_exact_train_batch_plan requires a positive rollout.n")
-            if self._is_ai4s_v6_full_parameter():
-                from training.contract import load_contract
-
-                formal_contract, _ = load_contract()
-                expected_rollout_n = int(formal_contract["training"]["rollout_n"])
-                if rollout_n != expected_rollout_n:
-                    raise ValueError(
-                        "Formal V6 exact prompt-batch plan requires "
-                        f"rollout.n={expected_rollout_n}, got {rollout_n}"
-                    )
             batch_plan = TrainingBatchPlan(
                 dataset_size=len(self.train_dataset),
                 train_batch_size=train_batch_size,
@@ -1008,29 +581,10 @@ class RayPPOTrainer:
                     f"loader={len(self.train_dataloader)}, plan={batch_plan.outer_steps_per_epoch}"
                 )
             configured_steps = self.config.trainer.total_training_steps
-            v6_smoke = (
-                self.config.actor_rollout_ref.actor.get("training_mode", "legacy") == "full_parameter"
-                and self.config.trainer.get("dart_smoke_audit_dir", None) is not None
-            )
             if configured_steps is not None and int(configured_steps) != batch_plan.total_outer_steps:
-                configured_steps = int(configured_steps)
-                if not (
-                    v6_smoke
-                    and configured_steps in {1, 10}
-                    and configured_steps < batch_plan.total_outer_steps
-                ):
-                    raise ValueError(
-                        "trainer.total_training_steps disagrees with the exact full-data plan: "
-                        f"configured={configured_steps}, required={batch_plan.total_outer_steps}"
-                    )
-                # A ten-step V6 smoke consumes the first ten exact balanced
-                # batches from the same stateful sampler and scientific data
-                # plan.  Only the isolated horizon is shortened.
-                total_training_steps = configured_steps
-                optimizer_training_steps = configured_steps
-            else:
-                total_training_steps = batch_plan.total_outer_steps
-                optimizer_training_steps = batch_plan.total_optimizer_steps
+                raise ValueError("total_training_steps must match the full-data batch plan")
+            total_training_steps = batch_plan.total_outer_steps
+            optimizer_training_steps = batch_plan.total_optimizer_steps
             self.training_batch_plan = batch_plan
             print(
                 "Exact training batch plan: "
@@ -1088,131 +642,6 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
-    def _decode_v8_rollout_rows(self, batch: DataProto) -> tuple[list[str], list[str], dict[str, list]]:
-        """Decode only sampled actions and reconstruct prompt-owned transport.
-
-        This path is selected by the immutable V8 static schema, never by a
-        template-name heuristic.  The opening delimiter remains presentation
-        context and is never included in sampled token IDs or log-probability
-        accounting.
-        """
-
-        from training.contract import load_contract
-        from verl.utils.response_protocol import (
-            PROTOCOL_MISSING_CLOSE,
-            PROTOCOL_NESTED_OPEN,
-            classify_answer_protocol,
-        )
-
-        contract, _ = load_contract()
-        if contract.get("schema_version") != "vision_opd_ai4s_v8_fullimage_curriculum_static_contract_v1":
-            raise RuntimeError("V8 rollout decoder was invoked for a non-V8 static contract")
-        semantic = contract["rollout"]["semantic_stop"]
-        prefix = semantic["transport_prefix"]
-        rollout = self.config.actor_rollout_ref.rollout
-        if (
-            not bool(rollout.get("semantic_stop_virtual_open", False))
-            or str(rollout.get("semantic_stop_transport_prefix", "")) != prefix
-        ):
-            raise RuntimeError("Resolved rollout config lost the V8 virtual-open protocol")
-
-        responses = batch.batch["responses"]
-        response_mask = batch.batch.get("response_mask")
-        if response_mask is None or response_mask.shape != responses.shape:
-            raise RuntimeError("V8 rollout logging requires an explicit response-aligned mask")
-        mask = response_mask.to(torch.bool)
-        if not torch.equal(response_mask, mask.to(response_mask.dtype)):
-            raise RuntimeError("V8 response_mask must be binary")
-        if mask.shape[1] > 1 and bool((mask[:, 1:] & ~mask[:, :-1]).any().item()):
-            raise RuntimeError("V8 response_mask must be a contiguous sampled prefix")
-        attention = batch.batch.get("attention_mask")
-        if attention is None or attention.shape[0] != responses.shape[0]:
-            raise RuntimeError("V8 rollout logging requires a batch-aligned attention mask")
-        if not torch.equal(attention[:, -responses.shape[1] :].to(torch.bool), mask):
-            raise RuntimeError("V8 response_mask differs from the response attention suffix")
-
-        non_tensors = batch.non_tensor_batch or {}
-        prefixes = np.asarray(non_tensors.get("rollout_response_transport_prefix"), dtype=object)
-        statuses = np.asarray(non_tensors.get("rollout_protocol_status"), dtype=object)
-        stop_reasons = np.asarray(non_tensors.get("rollout_stop_reason"), dtype=object)
-        expected_shape = (responses.shape[0],)
-        for name, values in (
-            ("rollout_response_transport_prefix", prefixes),
-            ("rollout_protocol_status", statuses),
-            ("rollout_stop_reason", stop_reasons),
-        ):
-            if values.shape != expected_shape:
-                raise RuntimeError(f"V8 {name} is not trajectory aligned")
-        if any(str(value) != prefix for value in prefixes):
-            raise RuntimeError("V8 rollout transport prefix drifted across trajectories")
-
-        continuations: list[str] = []
-        protocols: list[str] = []
-        token_ids: list[list[int]] = []
-        offline_statuses: list[str] = []
-        strict_valid: list[bool] = []
-        for row in range(responses.shape[0]):
-            ids = responses[row][mask[row]].detach().cpu().tolist()
-            continuation = self.tokenizer.decode(
-                ids,
-                # This is the forensic sampled-action record.  Preserve EOS
-                # and every other special token so malformed early stops are
-                # not made to look like ordinary text by the logger.
-                skip_special_tokens=False,
-                clean_up_tokenization_spaces=False,
-            )
-            classified = classify_answer_protocol(continuation, virtual_open=True)
-            reported = str(statuses[row])
-            if reported == "not_closed":
-                # ``not_closed`` is the online termination observation: the
-                # decoder never confirmed an exact closing delimiter before
-                # EOS/length.  It is not an offline strict-format category.
-                # In particular, a model may redundantly sample ``<answer>``
-                # and then hit EOS without ever closing; the exact offline
-                # diagnosis is ``nested_open``, while ``not_closed`` remains
-                # the correct online state.  Check the property that semantic
-                # stopping actually guarantees instead of conflating the two
-                # classifications.
-                if semantic["stop_string"] in continuation:
-                    raise RuntimeError(
-                        "A not_closed rollout contains the exact closing delimiter"
-                    )
-                if classified.status not in {
-                    PROTOCOL_MISSING_CLOSE,
-                    PROTOCOL_NESTED_OPEN,
-                }:
-                    raise RuntimeError(
-                        "A not_closed rollout has an impossible offline protocol classification: "
-                        f"{classified.status!r}"
-                    )
-            elif reported != classified.status:
-                raise RuntimeError(
-                    "Rollout semantic status differs from independent protocol classification: "
-                    f"reported={reported!r}, classified={classified.status!r}"
-                )
-            token_ids.append([int(value) for value in ids])
-            continuations.append(continuation)
-            protocols.append(classified.reconstructed_text)
-            offline_statuses.append(classified.status)
-            strict_valid.append(classified.strict_valid)
-        return continuations, protocols, {
-            "sampled_continuation": continuations,
-            "protocol_response": protocols,
-            "response_token_ids": token_ids,
-            "response_token_count": [len(values) for values in token_ids],
-            "transport_prefix": [prefix] * len(continuations),
-            "transport_prefix_sampled": [False] * len(continuations),
-            # Public consumers receive the independently recomputed strict
-            # whole-response classification.  Preserve the online stopping
-            # state separately: ``not_closed`` is an execution observation,
-            # not a public protocol category, and conflating the two made
-            # capped/EOS rows impossible for the panel to validate.
-            "protocol_status": offline_statuses,
-            "semantic_stop_protocol_status": [str(value) for value in statuses],
-            "offline_protocol_classification": offline_statuses,
-            "strict_protocol_valid": strict_valid,
-            "stop_reason": [str(value) for value in stop_reasons],
-        }
 
     def _log_rollout_data(
         self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
@@ -1225,26 +654,9 @@ class RayPPOTrainer:
             rollout_data_dir (str): Directory path to save the rollout data
         """
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
-            from training.contract import load_contract
-
-            static_contract, _ = load_contract()
-            is_v8 = static_contract.get("schema_version") == "vision_opd_ai4s_v8_fullimage_curriculum_static_contract_v1"
-            if is_v8:
-                prompt_ids = batch.batch["prompts"]
-                prompt_mask = batch.batch["attention_mask"][:, : prompt_ids.shape[1]].to(torch.bool)
-                inputs = [
-                    self.tokenizer.decode(
-                        prompt_ids[row][prompt_mask[row]].detach().cpu().tolist(),
-                        skip_special_tokens=True,
-                        clean_up_tokenization_spaces=False,
-                    )
-                    for row in range(prompt_ids.shape[0])
-                ]
-                _, outputs, protocol_dump = self._decode_v8_rollout_rows(batch)
-            else:
-                inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
-                outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
-                protocol_dump = {}
+            inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+            protocol_dump = {}
             score_tensor = batch.batch.get("token_level_scores")
             scores = score_tensor.sum(-1).cpu().tolist() if score_tensor is not None else [None] * len(batch)
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
@@ -1263,15 +675,6 @@ class RayPPOTrainer:
                         values = values.tolist()
                     if len(values) == len(batch):
                         reward_extra_infos_to_dump.setdefault(key, list(values))
-            if is_v8 and "uid" in reward_extra_infos_to_dump:
-                occurrences: dict[str, int] = {}
-                trajectory_indices = []
-                for raw_uid in reward_extra_infos_to_dump["uid"]:
-                    uid = str(raw_uid)
-                    trajectory_indices.append(occurrences.get(uid, 0))
-                    occurrences[uid] = occurrences.get(uid, 0) + 1
-                reward_extra_infos_to_dump["trajectory_index_within_uid"] = trajectory_indices
-
             self._dump_generations(
                 inputs=inputs,
                 outputs=outputs,
@@ -1281,629 +684,11 @@ class RayPPOTrainer:
                 dump_path=rollout_data_dir,
             )
 
-    @staticmethod
-    def _audit_tensor_summary(value: torch.Tensor) -> dict[str, Any]:
-        """Return a reproducible byte hash without changing the source tensor."""
-        cpu_value = value.detach().contiguous().cpu()
-        byte_view = cpu_value.view(torch.uint8)
-        return {
-            "shape": list(cpu_value.shape),
-            "dtype": str(cpu_value.dtype),
-            "sha256": hashlib.sha256(byte_view.numpy().tobytes()).hexdigest(),
-        }
 
-    @classmethod
-    def _audit_input_summary(cls, value: Any) -> Any:
-        """Hash large multimodal inputs while preserving their nested contract."""
-        if isinstance(value, torch.Tensor):
-            return {"kind": "tensor", **cls._audit_tensor_summary(value)}
-        if isinstance(value, np.ndarray):
-            if value.dtype == object:
-                return [cls._audit_input_summary(item) for item in value.tolist()]
-            contiguous = np.ascontiguousarray(value)
-            return {
-                "kind": "ndarray",
-                "shape": list(contiguous.shape),
-                "dtype": str(contiguous.dtype),
-                "sha256": hashlib.sha256(contiguous.tobytes()).hexdigest(),
-            }
-        if isinstance(value, Image.Image):
-            return {
-                "kind": "PIL.Image",
-                "mode": value.mode,
-                "size": list(value.size),
-                "sha256": hashlib.sha256(value.tobytes()).hexdigest(),
-            }
-        if isinstance(value, dict):
-            return {str(key): cls._audit_input_summary(item) for key, item in sorted(value.items())}
-        if isinstance(value, (list, tuple)):
-            return [cls._audit_input_summary(item) for item in value]
-        if value is None or isinstance(value, (str, int, float, bool)):
-            return value
-        return {"kind": type(value).__qualname__, "repr": repr(value)}
 
-    @staticmethod
-    def _validated_route_query_audit(value: Any) -> dict[str, Any]:
-        """Validate and normalize the semantic provenance attached to one route."""
 
-        from verl.utils.route_query import (
-            ROUTE_QUERY_POLICY,
-            ROUTE_QUERY_SCHEMA_VERSION_V1,
-            ROUTE_QUERY_SCHEMA_VERSION_V2,
-            SUPPORTED_ROUTE_QUERY_SCHEMAS,
-        )
 
-        if not isinstance(value, Mapping):
-            raise ValueError("query_audit must be a mapping")
-        audit = deepcopy(dict(value))
-        route_schema = audit.get("schema_version")
-        if route_schema not in SUPPORTED_ROUTE_QUERY_SCHEMAS:
-            raise ValueError("query_audit has an unsupported schema_version")
-        if audit.get("query_policy") != ROUTE_QUERY_POLICY:
-            raise ValueError("query_audit has an unsupported query_policy")
 
-        source = audit.get("source")
-        if not isinstance(source, str) or not source.strip():
-            raise ValueError("query_audit source must be a non-empty string")
-        canonical_text = audit.get("canonical_text")
-        if not isinstance(canonical_text, str) or not canonical_text.strip():
-            raise ValueError("query_audit canonical_text must be a non-empty string")
-        canonical_sha256 = audit.get("canonical_sha256")
-        expected_sha256 = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
-        if canonical_sha256 != expected_sha256:
-            raise ValueError("query_audit canonical_sha256 does not match canonical_text")
-
-        segments = audit.get("segments")
-        if not isinstance(segments, (list, tuple)) or any(
-            not isinstance(segment, str) or not segment.strip() for segment in segments
-        ):
-            raise ValueError("query_audit segments must contain non-empty semantic strings")
-        if route_schema == ROUTE_QUERY_SCHEMA_VERSION_V1 and len(segments) != 5:
-            raise ValueError("V1 query_audit segments must contain one question and options A-D")
-        if route_schema == ROUTE_QUERY_SCHEMA_VERSION_V2 and len(segments) < 1:
-            raise ValueError("V2 query_audit must contain at least one question segment")
-        normalized_segments = [segment.strip() for segment in segments]
-        if "\n".join(normalized_segments) != canonical_text:
-            raise ValueError("query_audit segments do not reconstruct canonical_text")
-
-        def integer_list(field: str) -> list[int]:
-            raw = audit.get(field)
-            if isinstance(raw, np.ndarray):
-                raw = raw.tolist()
-            if not isinstance(raw, (list, tuple)) or not raw:
-                raise ValueError(f"query_audit {field} must be a non-empty integer sequence")
-            if any(
-                isinstance(item, (bool, np.bool_)) or not isinstance(item, (int, np.integer))
-                for item in raw
-            ):
-                raise ValueError(f"query_audit {field} must contain only integers")
-            normalized = [int(item) for item in raw]
-            if any(item < 0 for item in normalized):
-                raise ValueError(f"query_audit {field} must contain non-negative integers")
-            return normalized
-
-        selected_token_indices = integer_list("selected_token_indices")
-        selected_token_ids = integer_list("selected_token_ids")
-        if len(selected_token_indices) != len(selected_token_ids):
-            raise ValueError("query_audit selected_token_indices/token_ids must have equal length")
-        if selected_token_indices != sorted(set(selected_token_indices)):
-            raise ValueError("query_audit selected_token_indices must be strictly increasing and unique")
-        selected_token_count = audit.get("selected_token_count")
-        if (
-            isinstance(selected_token_count, (bool, np.bool_))
-            or not isinstance(selected_token_count, (int, np.integer))
-            or int(selected_token_count) != len(selected_token_indices)
-        ):
-            raise ValueError("query_audit selected_token_count does not match selected token provenance")
-
-        audit["segments"] = normalized_segments
-        audit["selected_token_indices"] = selected_token_indices
-        audit["selected_token_ids"] = selected_token_ids
-        audit["selected_token_count"] = len(selected_token_indices)
-        try:
-            json.dumps(audit, ensure_ascii=False, sort_keys=True)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("query_audit must remain JSON-serializable for the smoke summary") from exc
-        return audit
-
-    @staticmethod
-    def _validated_v8_smoke_protocol_evidence(
-        batch: DataProto,
-        expected_count: int,
-    ) -> dict[str, list[str]]:
-        """Return exact trajectory-aligned V8 answer-protocol evidence."""
-
-        protocol_evidence: dict[str, list[str]] = {}
-        for key in (
-            "rollout_protocol_status",
-            "rollout_stop_reason",
-            "rollout_response_transport_prefix",
-        ):
-            raw_values = batch.non_tensor_batch.get(key)
-            if isinstance(raw_values, np.ndarray):
-                raw_values = raw_values.tolist()
-            if (
-                not isinstance(raw_values, (list, tuple))
-                or len(raw_values) != expected_count
-                or any(not isinstance(value, str) or not value for value in raw_values)
-            ):
-                raise RuntimeError(f"V8 smoke audit requires sample-aligned {key}")
-            protocol_evidence[key] = list(raw_values)
-        if set(protocol_evidence["rollout_response_transport_prefix"]) != {"<answer>"}:
-            raise RuntimeError("V8 smoke audit found a non-canonical virtual-open prefix")
-        return protocol_evidence
-
-    def _dump_dart_smoke_audit(self, batch: DataProto, audit_dir: str) -> None:
-        """Persist exact pre-update tensors/routes for a CDPruner/legacy smoke."""
-        required_tensors = {
-            "responses",
-            "response_mask",
-            "input_ids",
-            "attention_mask",
-            "position_ids",
-            "old_log_probs",
-            "rollout_log_probs",
-            "rollout_is_weights",
-            "teacher_input_ids",
-            "teacher_attention_mask",
-            "teacher_position_ids",
-            "teacher_response_start_idx",
-            "self_distillation_mask",
-        }
-        missing = sorted(required_tensors.difference(batch.batch.keys()))
-        if missing:
-            raise RuntimeError(f"CDPruner smoke audit is missing required tensors: {missing}")
-        if "dart_merge_routes" not in batch.non_tensor_batch:
-            raise RuntimeError("CDPruner smoke audit requires rollout-provided legacy-schema dart_merge_routes")
-
-        tensor_payload = {
-            key: value.detach().cpu()
-            for key, value in batch.batch.items()
-            if isinstance(value, torch.Tensor)
-            and (key in required_tensors or key in {"prompts", "response_start_idx"})
-        }
-        if tensor_payload["old_log_probs"].shape != tensor_payload["rollout_log_probs"].shape:
-            raise RuntimeError("CDPruner smoke audit found mismatched HF-old/rollout log-prob shapes")
-
-        from verl.models.transformers.vision_token_compressor import DARTMergeRoute
-
-        raw_route_samples = batch.non_tensor_batch["dart_merge_routes"]
-        if isinstance(raw_route_samples, np.ndarray):
-            raw_route_samples = raw_route_samples.tolist()
-        compressor_algorithm = "qwen35_cdpruner_v1"
-        try:
-            compressor_algorithm = self.config.actor_rollout_ref.model.vision_token_compressor.algorithm
-        except (AttributeError, KeyError, TypeError):
-            pass
-        route_samples = []
-        route_summary = []
-        route_core_keys = {
-            "selected_indices",
-            "assignment",
-            "source_counts",
-            "original_tokens",
-            "output_tokens",
-            "anchor_coordinates",
-            "schema_version",
-            "algorithm",
-            "method",
-        }
-        for sample_index, raw_sample in enumerate(raw_route_samples):
-            if isinstance(raw_sample, np.ndarray):
-                raw_sample = raw_sample.tolist()
-            if isinstance(raw_sample, (dict, DARTMergeRoute)):
-                raw_sample = [raw_sample]
-            serialized_sample = []
-            summarized_sample = []
-            for route_index, raw_route in enumerate(raw_sample):
-                route = raw_route if isinstance(raw_route, DARTMergeRoute) else DARTMergeRoute.from_dict(raw_route)
-                route.validate_for_algorithm(str(compressor_algorithm))
-                if not isinstance(raw_route, Mapping):
-                    raise ValueError(
-                        "CDPruner smoke routes must retain serialized query_audit provenance; "
-                        f"sample={sample_index}, route={route_index}"
-                    )
-                non_string_extension_keys = [
-                    key for key in raw_route if key not in route_core_keys and not isinstance(key, str)
-                ]
-                if non_string_extension_keys:
-                    raise ValueError(
-                        "CDPruner smoke route extension keys must be strings: "
-                        f"sample={sample_index}, route={route_index}, keys={non_string_extension_keys!r}"
-                    )
-                extensions = {
-                    key: deepcopy(value) for key, value in raw_route.items() if key not in route_core_keys
-                }
-                try:
-                    extensions["query_audit"] = self._validated_route_query_audit(extensions.get("query_audit"))
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        "CDPruner smoke route has invalid query_audit provenance: "
-                        f"sample={sample_index}, route={route_index}: {exc}"
-                    ) from exc
-                serialized = route.as_dict(cpu=True)
-                serialized.update(extensions)
-                serialized_sample.append(serialized)
-                summarized = {
-                    "original_tokens": route.original_tokens,
-                    "output_tokens": route.output_tokens,
-                    "selected_indices": self._audit_tensor_summary(serialized["selected_indices"]),
-                    "assignment": self._audit_tensor_summary(serialized["assignment"]),
-                    "source_counts": self._audit_tensor_summary(serialized["source_counts"]),
-                    "anchor_coordinates": self._audit_tensor_summary(serialized["anchor_coordinates"]),
-                }
-                summarized.update(
-                    {key: self._audit_input_summary(value) for key, value in sorted(extensions.items())}
-                )
-                summarized_sample.append(summarized)
-            if not serialized_sample:
-                raise RuntimeError("CDPruner smoke audit encountered an empty route sample")
-            route_samples.append(serialized_sample)
-            route_summary.append(summarized_sample)
-
-        multimodal_summary = self._audit_input_summary(batch.non_tensor_batch.get("multi_modal_inputs"))
-        os.makedirs(audit_dir, exist_ok=True)
-        stem = f"pre_update_step_{int(self.global_steps)}"
-        tensor_path = os.path.join(audit_dir, f"{stem}.pt")
-        summary_path = os.path.join(audit_dir, f"{stem}.json")
-        if os.path.exists(tensor_path) or os.path.exists(summary_path):
-            raise FileExistsError(f"Refusing to overwrite an existing CDPruner smoke audit artifact: {stem}")
-
-        artifact = {
-            "schema_version": "vision_opd_cdpruner_smoke_v1",
-            "vision_token_compressor_algorithm": str(compressor_algorithm),
-            "global_step": int(self.global_steps),
-            "tensors": tensor_payload,
-            "dart_merge_routes": route_samples,
-            "multi_modal_input_summary": multimodal_summary,
-        }
-        tensor_tmp = f"{tensor_path}.tmp-{os.getpid()}"
-        summary_tmp = f"{summary_path}.tmp-{os.getpid()}"
-        torch.save(artifact, tensor_tmp)
-        summary = {
-            "schema_version": "vision_opd_cdpruner_smoke_v1",
-            "vision_token_compressor_algorithm": str(compressor_algorithm),
-            "global_step": int(self.global_steps),
-            "tensor_summaries": {
-                key: self._audit_tensor_summary(value) for key, value in sorted(tensor_payload.items())
-            },
-            "dart_merge_routes": route_summary,
-            "multi_modal_input_summary": multimodal_summary,
-        }
-        with open(summary_tmp, "w", encoding="utf-8") as handle:
-            json.dump(summary, handle, ensure_ascii=False, indent=2, sort_keys=True)
-        os.replace(tensor_tmp, tensor_path)
-        os.replace(summary_tmp, summary_path)
-
-    def _dump_v6_dpc_smoke_audit(self, batch: DataProto, audit_dir: str) -> None:
-        """Persist method-specific V6/V7/V8 full-parameter smoke evidence."""
-
-        from training.contract import load_contract
-
-        release_contract, _ = load_contract()
-        compressor_algorithm = self._formal_compressor_algorithm()
-        is_v8 = compressor_algorithm == "qwen35_cdpruner_v1"
-        if compressor_algorithm not in {
-            "qwen35_holitom_dpc_spatial_merge_v1",
-            "qwen35_cdpruner_v1",
-        }:
-            raise RuntimeError(
-                "Full-parameter smoke producer does not support compressor algorithm "
-                f"{compressor_algorithm!r}"
-            )
-
-        smoke_steps = int(self.config.trainer.total_training_steps)
-        if smoke_steps not in {1, 10}:
-            raise RuntimeError("Formal full-parameter smoke producer is restricted to a 1/10-step isolated run")
-        if int(self.global_steps) < 1 or int(self.global_steps) > smoke_steps:
-            raise RuntimeError(
-                "Formal full-parameter smoke producer step is outside its isolated horizon: "
-                f"global_step={self.global_steps}, horizon={smoke_steps}"
-            )
-
-        curriculum_state = None
-        if is_v8:
-            from verl.models.transformers.visual_token_curriculum import (
-                VisualTokenCurriculum,
-            )
-
-            curriculum = VisualTokenCurriculum.from_mapping(
-                release_contract["compressor"]["curriculum"]
-            )
-            curriculum_state = curriculum.runtime_state(int(self.global_steps) - 1)
-
-        required_tensors = {
-            "responses",
-            "response_mask",
-            "input_ids",
-            "attention_mask",
-            "position_ids",
-            "teacher_input_ids",
-            "teacher_attention_mask",
-            "teacher_position_ids",
-            "teacher_response_start_idx",
-            "self_distillation_mask",
-        }
-        if is_v8:
-            required_tensors.update({"old_log_probs", "rollout_log_probs", "rollout_is_weights"})
-        missing = sorted(required_tensors.difference(batch.batch.keys()))
-        if missing:
-            raise RuntimeError(f"Formal smoke audit is missing required tensors: {missing}")
-        route_key = "dart_merge_routes" if is_v8 else "dpc_merge_routes"
-        forbidden_route_key = "dpc_merge_routes" if is_v8 else "dart_merge_routes"
-        if route_key not in batch.non_tensor_batch:
-            raise RuntimeError(
-                f"Formal {compressor_algorithm} smoke audit requires rollout-provided {route_key}"
-            )
-        if forbidden_route_key in batch.non_tensor_batch:
-            raise RuntimeError(
-                f"Formal {compressor_algorithm} smoke audit forbids {forbidden_route_key}"
-            )
-
-        from verl.models.transformers.vision_token_compressor import (
-            DARTMergeRoute,
-            HoliTomDPCSpatialMergeRoute,
-            validate_cdpruner_curriculum_route,
-        )
-
-        raw_route_samples = batch.non_tensor_batch[route_key]
-        if isinstance(raw_route_samples, np.ndarray):
-            raw_route_samples = raw_route_samples.tolist()
-        protocol_evidence = (
-            self._validated_v8_smoke_protocol_evidence(batch, len(raw_route_samples))
-            if is_v8
-            else {}
-        )
-        sample_uids = batch.non_tensor_batch.get("uid") if is_v8 else None
-        if is_v8 and (sample_uids is None or len(sample_uids) != len(raw_route_samples)):
-            raise RuntimeError("V8 CDPruner smoke routes require one batch-aligned immutable UID")
-        route_samples = []
-        route_summary = []
-        for sample_index, raw_sample in enumerate(raw_route_samples):
-            if isinstance(raw_sample, np.ndarray):
-                raw_sample = raw_sample.tolist()
-            if isinstance(raw_sample, (dict, DARTMergeRoute, HoliTomDPCSpatialMergeRoute)):
-                raw_sample = [raw_sample]
-            if not isinstance(raw_sample, (list, tuple)) or not raw_sample:
-                raise RuntimeError(f"Formal smoke route sample {sample_index} is empty or invalid")
-            serialized_sample = []
-            summarized_sample = []
-            for route_index, raw_route in enumerate(raw_sample):
-                if not isinstance(raw_route, Mapping):
-                    raise RuntimeError(
-                        "Formal routes must remain serialized mappings so provenance cannot be dropped: "
-                        f"sample={sample_index}, route={route_index}"
-                    )
-                if is_v8:
-                    core_keys = {
-                        "schema_version",
-                        "algorithm",
-                        "method",
-                        "selected_indices",
-                        "assignment",
-                        "source_counts",
-                        "original_tokens",
-                        "output_tokens",
-                        "anchor_coordinates",
-                        "retention_bps",
-                        "curriculum_completed_steps",
-                        "curriculum_schedule_sha256",
-                    }
-                    if set(raw_route) != core_keys | {"query_audit"}:
-                        raise RuntimeError(
-                            "V8 CDPruner route has a non-canonical field inventory: "
-                            f"sample={sample_index}, route={route_index}, keys={sorted(raw_route)}"
-                        )
-                    route = DARTMergeRoute.from_dict(raw_route)
-                    validate_cdpruner_curriculum_route(route, curriculum_state)
-                    query_audit = self._validated_route_query_audit(raw_route.get("query_audit"))
-                    expected_uid = str(sample_uids[sample_index])
-                    if not expected_uid or query_audit.get("sample_uid") != expected_uid:
-                        raise RuntimeError(
-                            "V8 CDPruner query audit is not bound to its exact rollout UID: "
-                            f"sample={sample_index}, route={route_index}"
-                        )
-                else:
-                    expected_route_keys = {
-                        "schema_version",
-                        "algorithm",
-                        "method",
-                        "center_indices",
-                        "assignment",
-                        "source_counts",
-                        "original_tokens",
-                        "output_tokens",
-                        "anchor_coordinates",
-                    }
-                    if set(raw_route) != expected_route_keys:
-                        raise RuntimeError(
-                            "V6/V7 DPC smoke route has a non-canonical field inventory: "
-                            f"sample={sample_index}, route={route_index}, keys={sorted(raw_route)}"
-                        )
-                    route = HoliTomDPCSpatialMergeRoute.from_dict(raw_route)
-                    route.validate()
-                    query_audit = None
-                if route.anchor_coordinates is None:
-                    raise RuntimeError("Formal smoke route must bind selected original M-RoPE coordinates")
-                if not is_v8:
-                    expected_output = min(
-                        route.original_tokens,
-                        max(32, (route.original_tokens + 19) // 20),
-                    )
-                    if route.output_tokens != expected_output:
-                        raise RuntimeError(
-                            "Formal smoke route violates K=min(N,max(32,ceil(0.05N))): "
-                            f"sample={sample_index}, route={route_index}, "
-                            f"N={route.original_tokens}, K={route.output_tokens}, "
-                            f"expected={expected_output}"
-                        )
-                serialized = route.as_dict(cpu=True)
-                if is_v8:
-                    serialized["query_audit"] = query_audit
-                serialized_sample.append(serialized)
-                index_key = "selected_indices" if is_v8 else "center_indices"
-                route_item = {
-                    "schema_version": serialized["schema_version"],
-                    "algorithm": serialized["algorithm"],
-                    "method": serialized["method"],
-                    "original_tokens": route.original_tokens,
-                    "output_tokens": route.output_tokens,
-                    index_key: self._audit_tensor_summary(serialized[index_key]),
-                    "assignment": self._audit_tensor_summary(serialized["assignment"]),
-                    "source_counts": self._audit_tensor_summary(serialized["source_counts"]),
-                    "anchor_coordinates": self._audit_tensor_summary(serialized["anchor_coordinates"]),
-                }
-                if is_v8:
-                    route_item["query_audit"] = self._audit_input_summary(query_audit)
-                    route_item.update(
-                        {
-                            "retention_bps": route.retention_bps,
-                            "curriculum_completed_steps": route.curriculum_completed_steps,
-                            "curriculum_schedule_sha256": route.curriculum_schedule_sha256,
-                        }
-                    )
-                summarized_sample.append(route_item)
-            route_samples.append(serialized_sample)
-            route_summary.append(summarized_sample)
-
-        tensor_payload = {
-            key: value.detach().cpu()
-            for key, value in batch.batch.items()
-            if isinstance(value, torch.Tensor)
-            and (key in required_tensors or key in {"prompts", "response_start_idx", "old_log_probs"})
-        }
-        multimodal_summary = self._audit_input_summary(batch.non_tensor_batch.get("multi_modal_inputs"))
-        selected_profile = os.environ.get("VERL_V6_SELECTED_PROFILE")
-        launch_contract_sha256 = os.environ.get("VERL_V6_LAUNCH_CONTRACT_SHA256")
-        preflight_sha256 = os.environ.get("VERL_V6_PREFLIGHT_SHA256")
-        run_root = os.environ.get("VERL_V6_RUN_ROOT")
-        canonical_profiles = {
-            str(profile["name"])
-            for profile in release_contract["hardware"]["micro_profiles_descending"]
-        }
-        if selected_profile not in canonical_profiles:
-            raise RuntimeError("V6 DPC smoke producer has no canonical selected profile")
-        for label, value in (
-            ("launch contract", launch_contract_sha256),
-            ("preflight", preflight_sha256),
-        ):
-            if (
-                not isinstance(value, str)
-                or len(value) != 64
-                or any(character not in "0123456789abcdef" for character in value)
-            ):
-                raise RuntimeError(f"V6 DPC smoke producer {label} hash is invalid")
-        if not isinstance(run_root, str) or not os.path.isabs(run_root):
-            raise RuntimeError("V6 DPC smoke producer run root must be absolute")
-        producer_context = {
-            "release_variant": release_contract["release_variant"],
-            "algorithm": release_contract["compressor"]["algorithm"],
-            "profile": selected_profile,
-            "max_pixels": int(self.config.actor_rollout_ref.model.processor_max_pixels),
-            "max_composite_cost_per_gpu": int(
-                self.config.actor_rollout_ref.actor.vision_packing.max_cost_per_gpu
-            ),
-            "smoke_steps": smoke_steps,
-            "run_root": os.path.abspath(run_root),
-            "launch_contract_sha256": launch_contract_sha256,
-            "preflight_sha256": preflight_sha256,
-            **({"visual_token_curriculum_state": curriculum_state} if is_v8 else {}),
-        }
-        route_count = sum(len(sample) for sample in route_samples)
-        producer_gates = {
-            "formal_full_parameter_mode": (
-                self.config.actor_rollout_ref.actor.training_mode == "full_parameter"
-            ),
-            "world_size_eight": int(self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes) == 8,
-            (
-                "cdpruner_route_inventory_nonempty"
-                if is_v8
-                else "dpc_route_inventory_nonempty"
-            ): route_count > 0,
-            (
-                "archived_holitom_routes_absent"
-                if is_v8
-                else "legacy_routes_absent"
-            ): forbidden_route_key not in batch.non_tensor_batch,
-            "audit_path_bound_to_run_root": (
-                os.path.abspath(audit_dir) == os.path.join(os.path.abspath(run_root), "audit")
-            ),
-            "checkpoint_path_bound_to_run_root": (
-                os.path.abspath(self.config.trainer.default_local_dir)
-                == os.path.join(os.path.abspath(run_root), "checkpoints")
-            ),
-            "fixed_dense_teacher_configured": (
-                self.config.actor_rollout_ref.actor.self_distillation.teacher_model_source == "fixed"
-                and self.config.actor_rollout_ref.actor.self_distillation.teacher_regularization == "fixed"
-                and self.config.actor_rollout_ref.actor.self_distillation.teacher_visual_compression_mode == "dense"
-            ),
-            "six_group_optimizer_declared": (
-                float(self.config.actor_rollout_ref.actor.optim.lr)
-                == float(release_contract["optimizer"]["language_lr"])
-                and float(self.config.actor_rollout_ref.actor.optim.vision_lr)
-                == float(release_contract["optimizer"]["vision_lr"])
-                and float(self.config.actor_rollout_ref.actor.optim.merger_lr)
-                == float(release_contract["optimizer"]["native_visual_merger_lr"])
-            ),
-        }
-        if not all(producer_gates.values()):
-            raise RuntimeError(f"Formal smoke producer context gates failed: {producer_gates}")
-        os.makedirs(audit_dir, exist_ok=True)
-        stem = f"{'v8' if is_v8 else 'v6'}_pre_update_step_{int(self.global_steps)}"
-        tensor_path = os.path.join(audit_dir, f"{stem}.pt")
-        summary_path = os.path.join(audit_dir, f"{stem}.json")
-        if os.path.exists(tensor_path) or os.path.exists(summary_path):
-            raise FileExistsError(f"Refusing to overwrite an existing formal smoke artifact: {stem}")
-        artifact = {
-            "schema_version": (
-                "vision_opd_ai4s_v8_fullparam_cdpruner_smoke_step_v1"
-                if is_v8
-                else "vision_opd_ai4s_v6_fullparam_dpc_smoke_step_v1"
-            ),
-            "vision_token_compressor_algorithm": compressor_algorithm,
-            "world_size": 8,
-            "global_step": int(self.global_steps),
-            **producer_context,
-            "producer_gates": producer_gates,
-            "tensors": tensor_payload,
-            route_key: route_samples,
-            "multi_modal_input_summary": multimodal_summary,
-            **(
-                {"sample_uids": [str(value) for value in sample_uids]}
-                if is_v8
-                else {}
-            ),
-            **protocol_evidence,
-        }
-        summary = {
-            "schema_version": artifact["schema_version"],
-            "vision_token_compressor_algorithm": artifact["vision_token_compressor_algorithm"],
-            "world_size": 8,
-            "global_step": int(self.global_steps),
-            **producer_context,
-            "producer_gates": producer_gates,
-            "route_count": route_count,
-            "tensor_summaries": {
-                key: self._audit_tensor_summary(value) for key, value in sorted(tensor_payload.items())
-            },
-            route_key: route_summary,
-            "multi_modal_input_summary": multimodal_summary,
-            **(
-                {"sample_uids": [str(value) for value in sample_uids]}
-                if is_v8
-                else {}
-            ),
-            **protocol_evidence,
-        }
-        tensor_tmp = f"{tensor_path}.tmp-{os.getpid()}"
-        summary_tmp = f"{summary_path}.tmp-{os.getpid()}"
-        torch.save(artifact, tensor_tmp)
-        with open(summary_tmp, "w", encoding="utf-8") as handle:
-            json.dump(summary, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tensor_tmp, tensor_path)
-        os.replace(summary_tmp, summary_path)
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
@@ -2230,668 +1015,20 @@ class RayPPOTrainer:
         # string used to turn it into characters and corrupt the teacher input.
         return [teacher_images]
 
-    @staticmethod
-    def _teacher_reuse_stable_value(value: Any) -> Any:
-        """Convert processor metadata to a deterministic JSON-safe value."""
 
-        if value is None or isinstance(value, (bool, int, float, str)):
-            return value
-        if isinstance(value, np.generic):
-            return value.item()
-        if isinstance(value, os.PathLike):
-            return os.fspath(value)
-        if isinstance(value, dict):
-            return {
-                str(key): RayPPOTrainer._teacher_reuse_stable_value(item)
-                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-            }
-        if isinstance(value, (list, tuple)):
-            return [RayPPOTrainer._teacher_reuse_stable_value(item) for item in value]
-        if isinstance(value, (torch.dtype, torch.device)):
-            return str(value)
-        return f"{type(value).__module__}.{type(value).__qualname__}:{value}"
 
-    @staticmethod
-    def _teacher_reuse_digest(payload: Any) -> str:
-        serialized = json.dumps(
-            RayPPOTrainer._teacher_reuse_stable_value(payload),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        )
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
-    def _teacher_reuse_file_descriptor(self, raw_path: str) -> Optional[dict[str, Any]]:
-        if raw_path.startswith(("http://", "https://", "data:")):
-            return None
-        path = os.path.realpath(os.path.abspath(os.path.expanduser(raw_path.removeprefix("file://"))))
-        try:
-            stat = os.stat(path)
-        except OSError:
-            return None
-        if not os.path.isfile(path):
-            return None
 
-        cache_key = (os.path.normcase(path), int(stat.st_size), int(stat.st_mtime_ns))
-        digest_cache = getattr(self, "_teacher_reuse_file_digest_cache", None)
-        if digest_cache is None:
-            digest_cache = {}
-            self._teacher_reuse_file_digest_cache = digest_cache
-        digest = digest_cache.get(cache_key)
-        if digest is None:
-            hasher = hashlib.sha256()
-            try:
-                with open(path, "rb") as handle:
-                    for block in iter(lambda: handle.read(1024 * 1024), b""):
-                        hasher.update(block)
-            except OSError:
-                return None
-            digest = hasher.hexdigest()
-            digest_cache[cache_key] = digest
-        return {
-            "kind": "file",
-            "path": os.path.normcase(path),
-            "size": int(stat.st_size),
-            "mtime_ns": int(stat.st_mtime_ns),
-            "sha256": digest,
-        }
 
-    def _teacher_reuse_image_descriptor(self, image: Any) -> Optional[dict[str, Any]]:
-        """Fingerprint an image source without decoding/resizing it again."""
 
-        if isinstance(image, np.ndarray) and image.dtype == object and image.size == 1:
-            image = image.reshape(-1)[0]
-        if isinstance(image, Image.Image):
-            rgb = image.convert("RGB")
-            hasher = hashlib.sha256()
-            hasher.update(f"{rgb.width}x{rgb.height}:RGB:".encode("ascii"))
-            hasher.update(rgb.tobytes())
-            return {
-                "kind": "pil-rgb",
-                "size": [rgb.width, rgb.height],
-                "sha256": hasher.hexdigest(),
-            }
-        if isinstance(image, os.PathLike):
-            image = os.fspath(image)
-        if isinstance(image, str):
-            return self._teacher_reuse_file_descriptor(image)
-        if not isinstance(image, dict):
-            return None
 
-        candidates: list[dict[str, Any]] = []
-        if image.get("bytes") is not None:
-            image_bytes = image["bytes"]
-            if not isinstance(image_bytes, (bytes, bytearray, memoryview)):
-                return None
-            candidates.append(
-                {
-                    "kind": "bytes",
-                    "size": len(image_bytes),
-                    "sha256": hashlib.sha256(bytes(image_bytes)).hexdigest(),
-                }
-            )
-        for key in ("image", "path"):
-            if image.get(key) is not None:
-                descriptor = self._teacher_reuse_image_descriptor(image[key])
-                if descriptor is None:
-                    return None
-                candidates.append(descriptor)
-        if not candidates:
-            return None
-        first = candidates[0]
-        if any(candidate != first for candidate in candidates[1:]):
-            # Ambiguous dictionaries are interpreted differently by the dataset,
-            # DART helper and legacy teacher normalizer.  Never guess.
-            return None
-        return first
 
-    def _teacher_reuse_message_image_descriptors(
-        self, messages: list[dict]
-    ) -> Optional[list[dict[str, Any]]]:
-        descriptors: list[dict[str, Any]] = []
-        for message in messages:
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for item in content:
-                if not isinstance(item, dict) or item.get("type") != "image":
-                    continue
-                if not set(item).issubset({"type", "image", "path", "bytes"}):
-                    return None
-                descriptor = self._teacher_reuse_image_descriptor(item)
-                if descriptor is None:
-                    return None
-                descriptors.append(descriptor)
-        return descriptors
 
-    def _teacher_reuse_prompt_digest(self, messages: list[dict]) -> Optional[str]:
-        def canonicalize(value: Any) -> Any:
-            if isinstance(value, Image.Image):
-                return self._teacher_reuse_image_descriptor(value)
-            if isinstance(value, (bytes, bytearray, memoryview)):
-                return {
-                    "kind": "bytes",
-                    "size": len(value),
-                    "sha256": hashlib.sha256(bytes(value)).hexdigest(),
-                }
-            if isinstance(value, np.ndarray):
-                return canonicalize(value.tolist())
-            if isinstance(value, os.PathLike):
-                return os.fspath(value)
-            if isinstance(value, dict):
-                if value.get("type") in {"image", "image_url"}:
-                    descriptor = self._teacher_reuse_image_descriptor(value)
-                    if descriptor is None:
-                        raise ValueError("unsupported image source")
-                    non_source = {
-                        str(key): canonicalize(item)
-                        for key, item in value.items()
-                        if key not in {"image", "image_url", "path", "bytes"}
-                    }
-                    non_source["source"] = descriptor
-                    return non_source
-                return {
-                    str(key): canonicalize(item)
-                    for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-                }
-            if isinstance(value, (list, tuple)):
-                return [canonicalize(item) for item in value]
-            if value is None or isinstance(value, (bool, int, float, str)):
-                return value
-            raise ValueError(f"unsupported prompt value: {type(value)}")
 
-        try:
-            return self._teacher_reuse_digest(canonicalize(messages))
-        except (OSError, TypeError, ValueError):
-            return None
 
-    def _teacher_reuse_processor_fingerprint(self) -> Optional[str]:
-        if self.processor is None:
-            return None
 
-        def component_payload(component: Any) -> Optional[dict[str, Any]]:
-            if component is None:
-                return None
-            payload: dict[str, Any] = {
-                "class": f"{type(component).__module__}.{type(component).__qualname__}",
-            }
-            for attr in ("name_or_path", "chat_template", "init_kwargs"):
-                if hasattr(component, attr):
-                    payload[attr] = getattr(component, attr)
-            if hasattr(component, "to_dict"):
-                try:
-                    payload["config"] = component.to_dict()
-                except Exception:
-                    return None
-            return payload
 
-        payload = {
-            "processor": component_payload(self.processor),
-            "tokenizer": component_payload(getattr(self.processor, "tokenizer", None)),
-            "image_processor": component_payload(getattr(self.processor, "image_processor", None)),
-            "video_processor": component_payload(getattr(self.processor, "video_processor", None)),
-            "processor_config": component_payload(getattr(self.processor, "config", None)),
-            "apply_chat_template_kwargs": dict(self.config.data.get("apply_chat_template_kwargs", {}) or {}),
-        }
-        try:
-            return self._teacher_reuse_digest(payload)
-        except (TypeError, ValueError):
-            return None
 
-    @staticmethod
-    def _teacher_reuse_local_path(path: Any) -> Optional[str]:
-        if not isinstance(path, (str, os.PathLike)):
-            return None
-        normalized = os.path.realpath(os.path.abspath(os.path.expanduser(os.fspath(path))))
-        if not os.path.isdir(normalized):
-            return None
-        return os.path.normcase(normalized)
-
-    @staticmethod
-    def _teacher_reuse_qwen3_model_config(model_path: str) -> Optional[dict[str, Any]]:
-        config_path = os.path.join(model_path, "config.json")
-        try:
-            with open(config_path, encoding="utf-8") as handle:
-                config = json.load(handle)
-        except (OSError, TypeError, ValueError):
-            return None
-        model_type = config.get("model_type")
-        if model_type not in {"qwen3_5", "qwen3_5_moe", "qwen3_vl", "qwen3_vl_moe"}:
-            return None
-        hasher = hashlib.sha256()
-        try:
-            with open(config_path, "rb") as handle:
-                for block in iter(lambda: handle.read(1024 * 1024), b""):
-                    hasher.update(block)
-        except OSError:
-            return None
-        return {"model_type": model_type, "config_sha256": hasher.hexdigest()}
-
-    def _teacher_reuse_contract(self) -> Optional[dict[str, Any]]:
-        cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
-        compressor = self.config.actor_rollout_ref.model.get("vision_token_compressor", {})
-        if cfg is None or not bool(cfg.get("reuse_rollout_teacher_inputs", False)):
-            return None
-        if not bool(cfg.get("teacher_always_on", False)) or cfg.get("teacher_prompt_mode", None) is not None:
-            return None
-        if cfg.get("teacher_model_source", None) != "fixed" or not cfg.get("teacher_image_key", None):
-            return None
-        if self.processor is None or getattr(self, "async_rollout_mode", False):
-            return None
-        if self.config.actor_rollout_ref.rollout.get("name", None) != "hf":
-            return None
-        if bool(self.config.actor_rollout_ref.rollout.get("skip_rollout", False)):
-            return None
-        compressor_algorithm = compressor.get("algorithm", None)
-        if not bool(compressor.get("enabled", False)) or compressor_algorithm not in {
-            "qwen35_cdpruner_v1",
-            "qwen35_conditional_diversity_prune_v1",
-        }:
-            return None
-        # HFRollout's audited compressed entry point currently applies no extra chat
-        # template kwargs.  A non-empty driver-side value could change IDs.
-        if dict(self.config.data.get("apply_chat_template_kwargs", {}) or {}):
-            return None
-
-        model_path = self._teacher_reuse_local_path(self.config.actor_rollout_ref.model.get("path", None))
-        teacher_path = self._teacher_reuse_local_path(cfg.get("teacher_model_path", None))
-        if model_path is None or teacher_path != model_path:
-            return None
-        model_config = self._teacher_reuse_qwen3_model_config(model_path)
-        if model_config is None:
-            return None
-
-        # Transformers 5.5 Qwen3VLProcessor does not expose name_or_path even
-        # when created with from_pretrained().  Its nested tokenizer does, and
-        # the driver model path/config hash above is authoritative.  If a
-        # processor origin is present validate it, but do not require an
-        # attribute that the production processor class does not define.
-        processor_origin = self._teacher_reuse_local_path(getattr(self.processor, "name_or_path", None))
-        tokenizer_origin = self._teacher_reuse_local_path(
-            getattr(getattr(self.processor, "tokenizer", None), "name_or_path", None)
-        )
-        if tokenizer_origin != model_path or (processor_origin is not None and processor_origin != model_path):
-            return None
-
-        processor_fingerprint = self._teacher_reuse_processor_fingerprint()
-        if processor_fingerprint is None:
-            return None
-        return {
-            "schema": "rollout_teacher_input_reuse_v1",
-            "processor_fingerprint": processor_fingerprint,
-            "model_path": model_path,
-            "teacher_model_path": teacher_path,
-            "model_config": model_config,
-            "rollout": "hf",
-            "compressor": compressor_algorithm,
-        }
-
-    def _stamp_rollout_teacher_input_provenance(self, batch: DataProto) -> None:
-        """Record immutable pre-rollout inputs used to validate cached tensors later."""
-
-        contract = self._teacher_reuse_contract()
-        if contract is None:
-            return
-        cfg = self.config.actor_rollout_ref.actor.self_distillation
-        teacher_image_key = cfg.teacher_image_key
-        raw_prompts = batch.non_tensor_batch.get("raw_prompt")
-        teacher_image_batch = batch.non_tensor_batch.get(teacher_image_key)
-        if raw_prompts is None or teacher_image_batch is None:
-            return
-        # The audited source is HFRollout's raw-message processor path.  If a
-        # future/custom dataset supplies pre-tokenized inputs, HFRollout gives
-        # those precedence and this provenance would not describe the source.
-        if batch.batch is None or set(batch.batch.keys()) != {"dummy_tensor"}:
-            return
-
-        provenance = np.empty((len(batch),), dtype=object)
-        provenance[:] = None
-        teacher_prompt_batch = batch.non_tensor_batch.get("teacher_prompt")
-        # Share file hashes only within this pre-rollout snapshot.  The reuse
-        # check installs a fresh cache and therefore re-reads each file after
-        # rollout instead of trusting unchanged size/mtime metadata.
-        self._teacher_reuse_file_digest_cache = {}
-        try:
-            for sample_idx in range(len(batch)):
-                if teacher_prompt_batch is not None:
-                    continue
-                try:
-                    messages = list(raw_prompts[sample_idx])
-                    teacher_images = self._normalize_teacher_image_sequence(
-                        teacher_image_batch[sample_idx]
-                    )
-                    raw_image_descriptors = self._teacher_reuse_message_image_descriptors(messages)
-                    teacher_image_descriptors = [
-                        self._teacher_reuse_image_descriptor(image) for image in teacher_images
-                    ]
-                    prompt_digest = self._teacher_reuse_prompt_digest(messages)
-                    if (
-                        prompt_digest is None
-                        or raw_image_descriptors is None
-                        or not raw_image_descriptors
-                        or any(descriptor is None for descriptor in teacher_image_descriptors)
-                        or raw_image_descriptors != teacher_image_descriptors
-                    ):
-                        continue
-                    provenance[sample_idx] = {
-                        "contract": contract,
-                        "prompt_digest": prompt_digest,
-                        "image_descriptors": raw_image_descriptors,
-                    }
-                except (OSError, TypeError, ValueError):
-                    continue
-        finally:
-            self._teacher_reuse_file_digest_cache = {}
-        batch.non_tensor_batch["_rollout_teacher_input_provenance_v1"] = provenance
-
-    @staticmethod
-    def _clone_teacher_reuse_value(value: Any) -> Any:
-        if isinstance(value, torch.Tensor):
-            return value.detach().cpu().clone()
-        if isinstance(value, np.ndarray):
-            return value.copy()
-        if isinstance(value, dict):
-            return {key: RayPPOTrainer._clone_teacher_reuse_value(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [RayPPOTrainer._clone_teacher_reuse_value(item) for item in value]
-        if isinstance(value, tuple):
-            return tuple(RayPPOTrainer._clone_teacher_reuse_value(item) for item in value)
-        return deepcopy(value)
-
-    @staticmethod
-    def _teacher_reuse_route_original_tokens(route: Any) -> Optional[int]:
-        if isinstance(route, dict):
-            value = route.get("original_tokens")
-        else:
-            value = getattr(route, "original_tokens", None)
-        try:
-            value = int(value)
-        except (TypeError, ValueError):
-            return None
-        return value if value > 0 else None
-
-    def _recompute_teacher_reuse_prompt_position_ids(
-        self,
-        prompt_input_ids: torch.Tensor,
-        prompt_attention_mask: torch.Tensor,
-        multimodal_inputs: dict[str, Any],
-    ) -> torch.Tensor:
-        """Rebuild prompt positions from IDs/grid without touching image pixels."""
-
-        model_path = self._teacher_reuse_local_path(self.config.actor_rollout_ref.model.get("path", None))
-        if model_path is not None and self._teacher_reuse_qwen3_model_config(model_path) is not None:
-            from verl.models.transformers.vision_token_compressor import build_qwen3_5_position_ids
-
-            mm_token_type_ids = torch.zeros_like(prompt_input_ids).unsqueeze(0)
-            mm_token_type_ids[0][prompt_input_ids == int(self.processor.image_token_id)] = 1
-            video_token_id = getattr(self.processor, "video_token_id", None)
-            if video_token_id is not None:
-                mm_token_type_ids[0][prompt_input_ids == int(video_token_id)] = 2
-            return build_qwen3_5_position_ids(
-                self.processor,
-                input_ids=prompt_input_ids.unsqueeze(0),
-                attention_mask=prompt_attention_mask.unsqueeze(0),
-                mm_token_type_ids=mm_token_type_ids,
-                image_grid_thw=multimodal_inputs.get("image_grid_thw"),
-                video_grid_thw=multimodal_inputs.get("video_grid_thw"),
-            ).squeeze(1)
-
-        if not hasattr(self.processor, "get_rope_index"):
-            return compute_position_id_with_mask(prompt_attention_mask.unsqueeze(0)).squeeze(0)
-        rope_index_kwargs = {
-            "input_ids": prompt_input_ids,
-            "attention_mask": prompt_attention_mask,
-            "image_grid_thw": multimodal_inputs.get("image_grid_thw"),
-            "video_grid_thw": multimodal_inputs.get("video_grid_thw"),
-        }
-        try:
-            signature = inspect.signature(self.processor.get_rope_index)
-        except (TypeError, ValueError):
-            signature = None
-        if signature is None or "second_per_grid_ts" in signature.parameters:
-            rope_index_kwargs["second_per_grid_ts"] = multimodal_inputs.get("second_per_grid_ts")
-        try:
-            position_ids = self.processor.get_rope_index(**rope_index_kwargs)
-        except IndexError as exc:
-            if prompt_input_ids.dim() != 1 or "tuple index out of range" not in str(exc):
-                raise
-            rope_index_kwargs["input_ids"] = prompt_input_ids.unsqueeze(0)
-            rope_index_kwargs["attention_mask"] = prompt_attention_mask.unsqueeze(0)
-            position_ids = self.processor.get_rope_index(**rope_index_kwargs)
-        if isinstance(position_ids, tuple):
-            position_ids = position_ids[0]
-        if position_ids.dim() == 3 and position_ids.shape[1] == 1:
-            position_ids = position_ids.squeeze(1)
-        return self._maybe_expand_qwen2_5_vl_prompt_position_ids(position_ids, prompt_attention_mask)
-
-    def _try_reuse_rollout_teacher_prompt_inputs(
-        self,
-        batch: DataProto,
-        sample_idx: int,
-        raw_prompt_messages: list[dict],
-        teacher_images: list[Any],
-        teacher_prompt_messages: Optional[list[dict]],
-        responses: torch.Tensor,
-        response_mask: torch.Tensor,
-        max_prompt_len: int,
-    ) -> tuple[
-        Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]],
-        str,
-    ]:
-        """Reuse full-token rollout inputs only when every equivalence gate passes."""
-
-        contract = self._teacher_reuse_contract()
-        if contract is None:
-            return None, "contract"
-        if teacher_prompt_messages is not None:
-            return None, "teacher_prompt"
-
-        # Re-hash current sources after rollout.  This deliberately does not
-        # reuse the pre-rollout file digest cache.
-        self._teacher_reuse_file_digest_cache = {}
-
-        provenance_batch = batch.non_tensor_batch.get("_rollout_teacher_input_provenance_v1")
-        if provenance_batch is None or sample_idx >= len(provenance_batch):
-            return None, "provenance"
-        provenance = provenance_batch[sample_idx]
-        if not isinstance(provenance, dict) or provenance.get("contract") != contract:
-            return None, "processor_fingerprint"
-
-        prompt_digest = self._teacher_reuse_prompt_digest(raw_prompt_messages)
-        raw_image_descriptors = self._teacher_reuse_message_image_descriptors(raw_prompt_messages)
-        teacher_image_descriptors = [self._teacher_reuse_image_descriptor(image) for image in teacher_images]
-        if prompt_digest is None or prompt_digest != provenance.get("prompt_digest"):
-            return None, "prompt"
-        if (
-            raw_image_descriptors is None
-            or not raw_image_descriptors
-            or any(descriptor is None for descriptor in teacher_image_descriptors)
-            or raw_image_descriptors != teacher_image_descriptors
-            or raw_image_descriptors != provenance.get("image_descriptors")
-        ):
-            return None, "images"
-
-        required_tensor_keys = {"prompts", "input_ids", "attention_mask", "position_ids", "responses"}
-        if batch.batch is None or not required_tensor_keys.issubset(batch.batch.keys()):
-            return None, "source_tensors"
-        prompt_width = int(batch.batch["prompts"].shape[-1])
-        source_input_ids = batch.batch["input_ids"][sample_idx]
-        source_attention_mask = batch.batch["attention_mask"][sample_idx]
-        source_position_ids = batch.batch["position_ids"][sample_idx]
-        source_prompts = batch.batch["prompts"][sample_idx]
-        source_responses = batch.batch["responses"][sample_idx]
-        if (
-            source_input_ids.dim() != 1
-            or source_attention_mask.dim() != 1
-            or source_prompts.dim() != 1
-            or prompt_width <= 0
-            or source_input_ids.shape[-1] != prompt_width + responses.shape[-1]
-            or source_attention_mask.shape != source_input_ids.shape
-            or source_prompts.shape[-1] != prompt_width
-            or source_position_ids.shape[-1] != source_input_ids.shape[-1]
-        ):
-            return None, "source_shapes"
-        if not torch.equal(source_input_ids[:prompt_width], source_prompts):
-            return None, "prompt_prefix"
-        if not torch.equal(source_input_ids[prompt_width:].to(responses.device), responses):
-            return None, "responses"
-        if not torch.equal(source_responses.to(responses.device), responses):
-            return None, "responses"
-        if not torch.equal(source_attention_mask[prompt_width:].to(response_mask.device), response_mask):
-            return None, "response_mask"
-
-        prompt_mask = source_attention_mask[:prompt_width]
-        if not torch.all((prompt_mask == 0) | (prompt_mask == 1)):
-            return None, "prompt_mask"
-        prompt_mask_bool = prompt_mask.bool()
-        active_count = int(prompt_mask_bool.sum().item())
-        if active_count <= 0 or active_count > int(max_prompt_len):
-            return None, "prompt_length"
-        first_active = int(torch.nonzero(prompt_mask_bool, as_tuple=False)[0].item())
-        if first_active + active_count != prompt_width or not bool(prompt_mask_bool[first_active:].all().item()):
-            return None, "left_padding"
-
-        prompt_input_ids = source_prompts[prompt_mask_bool]
-        if source_position_ids.dim() == 1:
-            prompt_position_ids = source_position_ids[:prompt_width][prompt_mask_bool]
-            response_position_ids = source_position_ids[prompt_width:]
-            expected_response_positions = (
-                torch.arange(responses.shape[-1], device=source_position_ids.device, dtype=source_position_ids.dtype)
-                + prompt_position_ids[-1]
-                + 1
-            )
-        elif source_position_ids.dim() == 2:
-            prompt_position_ids = source_position_ids[:, :prompt_width][:, prompt_mask_bool]
-            response_position_ids = source_position_ids[:, prompt_width:]
-            expected_response_positions = (
-                torch.arange(responses.shape[-1], device=source_position_ids.device, dtype=source_position_ids.dtype)
-                .unsqueeze(0)
-                + prompt_position_ids[:, -1:]
-                + 1
-            )
-        else:
-            return None, "position_rank"
-        if not torch.equal(response_position_ids, expected_response_positions):
-            return None, "response_positions"
-
-        image_token_id = getattr(self.processor, "image_token_id", None)
-        if image_token_id is None:
-            image_token_id = getattr(getattr(self.processor, "tokenizer", None), "image_token_id", None)
-        if image_token_id is None:
-            return None, "image_token_id"
-        visual_indices = torch.nonzero(prompt_input_ids == int(image_token_id), as_tuple=False).flatten()
-        if visual_indices.numel() == 0:
-            return None, "visual_tokens"
-        split_points = torch.nonzero(torch.diff(visual_indices) != 1, as_tuple=False).flatten().tolist()
-        spans = []
-        span_start = 0
-        for split_point in split_points:
-            spans.append(visual_indices[span_start : split_point + 1])
-            span_start = split_point + 1
-        spans.append(visual_indices[span_start:])
-
-        routes_batch = batch.non_tensor_batch.get("dart_merge_routes")
-        multimodal_batch = batch.non_tensor_batch.get("multi_modal_inputs")
-        if routes_batch is None or multimodal_batch is None:
-            return None, "multimodal_source"
-        routes = routes_batch[sample_idx]
-        if isinstance(routes, np.ndarray):
-            routes = routes.tolist()
-        if not isinstance(routes, (list, tuple)):
-            return None, "routes"
-        multimodal_inputs = multimodal_batch[sample_idx]
-        if hasattr(multimodal_inputs, "data") and not isinstance(multimodal_inputs, dict):
-            multimodal_inputs = multimodal_inputs.data
-        if not isinstance(multimodal_inputs, dict):
-            return None, "multimodal_inputs"
-        image_grid_thw = multimodal_inputs.get("image_grid_thw")
-        pixel_values = multimodal_inputs.get("pixel_values")
-        if (
-            not isinstance(image_grid_thw, torch.Tensor)
-            or image_grid_thw.dim() != 2
-            or image_grid_thw.shape[1] != 3
-            or image_grid_thw.dtype == torch.bool
-            or image_grid_thw.is_floating_point()
-            or not bool((image_grid_thw > 0).all().item())
-            or not isinstance(pixel_values, torch.Tensor)
-            or pixel_values.dim() != 2
-            or not pixel_values.is_floating_point()
-            or pixel_values.numel() == 0
-            or not bool(torch.isfinite(pixel_values).all().item())
-        ):
-            return None, "pixel_grid"
-        image_count = len(raw_image_descriptors)
-        if len(spans) != image_count or len(routes) != image_count or image_grid_thw.shape[0] != image_count:
-            return None, "multi_image_contract"
-
-        from verl.models.transformers.vision_token_compressor import DARTMergeRoute
-
-        validated_routes = []
-        try:
-            for route in routes:
-                validated_route = route if isinstance(route, DARTMergeRoute) else DARTMergeRoute.from_dict(route)
-                validated_route.validate()
-                if validated_route.anchor_coordinates is None:
-                    return None, "routes"
-                validated_routes.append(validated_route)
-        except (KeyError, RuntimeError, TypeError, ValueError):
-            return None, "routes"
-        route_lengths = [route.original_tokens for route in validated_routes]
-        if [int(span.numel()) for span in spans] != route_lengths:
-            # This is the critical full-token gate: compressed public prompts
-            # have output-token spans and can never be reused by the teacher.
-            return None, "full_visual_tokens"
-        spatial_merge_size = int(getattr(self.processor.image_processor, "merge_size", 2))
-        if spatial_merge_size <= 0:
-            return None, "pixel_grid"
-        grid_patch_counts = image_grid_thw.to(torch.long).prod(dim=-1)
-        merge_area = spatial_merge_size**2
-        if bool((grid_patch_counts % merge_area != 0).any().item()):
-            return None, "pixel_grid"
-        grid_visual_lengths = (grid_patch_counts // merge_area).tolist()
-        if route_lengths != grid_visual_lengths:
-            return None, "pixel_grid"
-        expected_patch_rows = int(grid_patch_counts.sum().item())
-        if int(pixel_values.shape[0]) != expected_patch_rows:
-            return None, "pixel_grid"
-        for video_key in ("pixel_values_videos", "video_grid_thw"):
-            video_value = multimodal_inputs.get(video_key)
-            if isinstance(video_value, torch.Tensor) and video_value.numel() > 0:
-                return None, "video"
-
-        recomputed_prompt_position_ids = self._recompute_teacher_reuse_prompt_position_ids(
-            prompt_input_ids,
-            prompt_mask[prompt_mask_bool],
-            multimodal_inputs,
-        ).to(prompt_position_ids.device)
-        if not torch.equal(prompt_position_ids, recomputed_prompt_position_ids):
-            return None, "prompt_positions"
-        for span, route in zip(spans, validated_routes, strict=True):
-            selected = route.selected_indices.to(prompt_position_ids.device)
-            expected_anchors = prompt_position_ids[-3:, span].index_select(1, selected).transpose(0, 1).to(torch.long)
-            if not torch.equal(route.anchor_coordinates.to(expected_anchors.device), expected_anchors):
-                return None, "route_positions"
-
-        teacher_multi_modal_inputs = {
-            key: self._clone_teacher_reuse_value(value)
-            for key, value in multimodal_inputs.items()
-            if key not in {"input_ids", "attention_mask", "mm_token_type_ids", "images_seqlens"}
-        }
-        full_input_ids = torch.cat((prompt_input_ids.detach().cpu(), responses.detach().cpu()), dim=0).clone()
-        full_attention_mask = torch.cat(
-            (prompt_mask[prompt_mask_bool].detach().cpu(), response_mask.detach().cpu()), dim=0
-        ).clone()
-        full_position_ids = torch.cat(
-            (prompt_position_ids.detach().cpu(), response_position_ids.detach().cpu()), dim=-1
-        ).clone()
-        response_start_idx = torch.tensor(active_count, dtype=torch.long)
-        return (
-            full_input_ids,
-            full_attention_mask,
-            full_position_ids,
-            response_start_idx,
-            teacher_multi_modal_inputs,
-        ), "reused"
 
     def _get_visual_special_token_mappings(self) -> dict[int, str]:
         processing_class = self.processor or self.tokenizer
@@ -3369,8 +1506,6 @@ class RayPPOTrainer:
             teacher_response_start_idx_list = []
             teacher_multi_modal_inputs_list = []
             teacher_present_mask_list = []
-            teacher_input_reuse_count = 0
-            teacher_input_reuse_reasons: dict[str, int] = defaultdict(int)
             # rollout.n trajectories for one uid have different responses but
             # the exact same deterministic teacher prompt/image prefix.  Keep
             # ``reuse_rollout_teacher_inputs=False`` semantics: the first item
@@ -3411,96 +1546,68 @@ class RayPPOTrainer:
 
                 raw_prompt_source = batch.non_tensor_batch["raw_prompt"][i]
                 raw_prompt_messages = list(raw_prompt_source)
-                try:
-                    reused_inputs, _reuse_reason = self._try_reuse_rollout_teacher_prompt_inputs(
-                        batch=batch,
-                        sample_idx=i,
-                        raw_prompt_messages=raw_prompt_messages,
-                        teacher_images=teacher_images,
-                        teacher_prompt_messages=teacher_prompt_messages,
-                        responses=responses[i],
-                        response_mask=response_mask[i],
-                        max_prompt_len=self_distillation_cfg.max_reprompt_len,
-                    )
-                except (IndexError, KeyError, OSError, RuntimeError, TypeError, ValueError):
-                    # Cache/provenance data is an optimization hint, never a
-                    # correctness dependency. Malformed hints fail closed to
-                    # the canonical processor path.
-                    reused_inputs, _reuse_reason = None, "cache_validation_error"
-                if reused_inputs is not None:
+                uid_value = (
+                    batch.non_tensor_batch["uid"][i]
+                    if "uid" in batch.non_tensor_batch
+                    else None
+                )
+                prefix_cache_key = (
+                    (str(uid_value), id(raw_prompt_source), id(teacher_image_source), id(teacher_prompt_source))
+                    if uid_value is not None
+                    else None
+                )
+                cached_prefix = (
+                    teacher_prompt_prefix_cache.get(prefix_cache_key)
+                    if prefix_cache_key is not None
+                    else None
+                )
+                if cached_prefix is not None:
+                    (
+                        prompt_input_ids,
+                        prompt_attention_mask,
+                        prompt_position_ids,
+                        teacher_multi_modal_inputs,
+                    ) = cached_prefix
                     (
                         teacher_input_ids,
                         teacher_attention_mask,
                         teacher_position_ids,
                         teacher_response_start_idx,
                         teacher_multi_modal_inputs,
-                    ) = reused_inputs
-                    teacher_input_reuse_count += 1
-                    teacher_input_reuse_reasons["reused"] += 1
+                    ) = self._append_teacher_response_to_prompt_prefix(
+                        prompt_input_ids=prompt_input_ids,
+                        prompt_attention_mask=prompt_attention_mask,
+                        prompt_position_ids=prompt_position_ids,
+                        responses=responses[i],
+                        response_mask=response_mask[i],
+                        teacher_multi_modal_inputs=teacher_multi_modal_inputs,
+                    )
                 else:
-                    teacher_input_reuse_reasons[_reuse_reason] += 1
-                    uid_value = (
-                        batch.non_tensor_batch["uid"][i]
-                        if "uid" in batch.non_tensor_batch
-                        else None
+                    teacher_messages = self._prepare_teacher_messages(
+                        raw_prompt_messages,
+                        teacher_images,
+                        teacher_prompt_messages=teacher_prompt_messages,
                     )
-                    prefix_cache_key = (
-                        (str(uid_value), id(raw_prompt_source), id(teacher_image_source), id(teacher_prompt_source))
-                        if uid_value is not None
-                        else None
+                    (
+                        teacher_input_ids,
+                        teacher_attention_mask,
+                        teacher_position_ids,
+                        teacher_response_start_idx,
+                        teacher_multi_modal_inputs,
+                    ) = self._build_teacher_prompt_inputs(
+                        teacher_messages,
+                        responses[i],
+                        response_mask[i],
+                        max_prompt_len=self_distillation_cfg.max_reprompt_len,
                     )
-                    cached_prefix = (
-                        teacher_prompt_prefix_cache.get(prefix_cache_key)
-                        if prefix_cache_key is not None
-                        else None
-                    )
-                    if cached_prefix is not None:
-                        (
-                            prompt_input_ids,
-                            prompt_attention_mask,
-                            prompt_position_ids,
+                    if prefix_cache_key is not None:
+                        response_start = int(teacher_response_start_idx.item())
+                        teacher_prompt_prefix_cache[prefix_cache_key] = (
+                            teacher_input_ids[:response_start].clone(),
+                            teacher_attention_mask[:response_start].clone(),
+                            teacher_position_ids[..., :response_start].clone(),
                             teacher_multi_modal_inputs,
-                        ) = cached_prefix
-                        (
-                            teacher_input_ids,
-                            teacher_attention_mask,
-                            teacher_position_ids,
-                            teacher_response_start_idx,
-                            teacher_multi_modal_inputs,
-                        ) = self._append_teacher_response_to_prompt_prefix(
-                            prompt_input_ids=prompt_input_ids,
-                            prompt_attention_mask=prompt_attention_mask,
-                            prompt_position_ids=prompt_position_ids,
-                            responses=responses[i],
-                            response_mask=response_mask[i],
-                            teacher_multi_modal_inputs=teacher_multi_modal_inputs,
                         )
-                    else:
-                        teacher_messages = self._prepare_teacher_messages(
-                            raw_prompt_messages,
-                            teacher_images,
-                            teacher_prompt_messages=teacher_prompt_messages,
-                        )
-                        (
-                            teacher_input_ids,
-                            teacher_attention_mask,
-                            teacher_position_ids,
-                            teacher_response_start_idx,
-                            teacher_multi_modal_inputs,
-                        ) = self._build_teacher_prompt_inputs(
-                            teacher_messages,
-                            responses[i],
-                            response_mask[i],
-                            max_prompt_len=self_distillation_cfg.max_reprompt_len,
-                        )
-                        if prefix_cache_key is not None:
-                            response_start = int(teacher_response_start_idx.item())
-                            teacher_prompt_prefix_cache[prefix_cache_key] = (
-                                teacher_input_ids[:response_start].clone(),
-                                teacher_attention_mask[:response_start].clone(),
-                                teacher_position_ids[..., :response_start].clone(),
-                                teacher_multi_modal_inputs,
-                            )
                 teacher_input_ids_list.append(teacher_input_ids)
                 teacher_attention_mask_list.append(teacher_attention_mask)
                 teacher_position_ids_list.append(teacher_position_ids)
@@ -3544,12 +1651,7 @@ class RayPPOTrainer:
                 "self_distillation/teacher_image_swap_fraction": teacher_present_mask.mean().item(),
                 "self_distillation/policy_fallback_fraction": (1.0 - teacher_present_mask.mean()).item(),
                 "self_distillation/grpo_fallback_count": grpo_fallback_count,
-                "self_distillation/teacher_input_reuse_fraction": teacher_input_reuse_count / batch_size,
-                "self_distillation/teacher_input_reuse_fallback_fraction":
-                    (batch_size - teacher_input_reuse_count) / batch_size,
             }
-            for reason, count in sorted(teacher_input_reuse_reasons.items()):
-                metrics[f"self_distillation/teacher_input_reuse_reason/{reason}"] = count / batch_size
             return DataProto.from_dict(
                 tensors={
                     "teacher_input_ids": teacher_input_ids,
@@ -3680,11 +1782,6 @@ class RayPPOTrainer:
         }), metrics
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
-        # The stamp is intentionally created before rollout and retained on the
-        # controller's copy of the batch.  Reuse later requires this exact
-        # prompt/image/processor provenance; missing or stale stamps simply
-        # select the legacy teacher preprocessing path.
-        self._stamp_rollout_teacher_input_provenance(batch)
         reward_model_keys = (
             set({"data_source", "reward_model", "extra_info", "uid", "raw_prompt", "teacher_prompt"})
             & batch.non_tensor_batch.keys()
@@ -3777,13 +1874,7 @@ class RayPPOTrainer:
 
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
-            from training.contract import load_contract
-
-            validation_contract, _ = load_contract()
-            if validation_contract.get("schema_version") == "vision_opd_ai4s_v8_fullimage_curriculum_static_contract_v1":
-                _, output_texts, _ = self._decode_v8_rollout_rows(test_output_gen_batch)
-            else:
-                output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
+            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
 
             test_batch = test_batch.union(test_output_gen_batch)
@@ -3791,19 +1882,7 @@ class RayPPOTrainer:
 
             # Store original inputs
             input_ids = test_batch.batch["prompts"]
-            if validation_contract.get("schema_version") == "vision_opd_ai4s_v8_fullimage_curriculum_static_contract_v1":
-                prompt_mask = test_batch.batch["attention_mask"][:, : input_ids.shape[1]].to(torch.bool)
-                input_texts = [
-                    self.tokenizer.decode(
-                        input_ids[row][prompt_mask[row]].detach().cpu().tolist(),
-                        skip_special_tokens=True,
-                        clean_up_tokenization_spaces=False,
-                    )
-                    for row in range(input_ids.shape[0])
-                ]
-            else:
-                # TODO: Can we keep special tokens except for padding tokens?
-                input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
+            input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
             sample_inputs.extend(input_texts)
             sample_uids.extend(test_batch.non_tensor_batch["uid"])
 
@@ -4099,235 +2178,23 @@ class RayPPOTrainer:
         )
 
     def _save_checkpoint(self):
-        from verl.utils.fs import local_mkdir_safe
-        from verl.utils.checkpoint.integrity import (
-            GLOBAL_MANIFEST_NAME,
-            GLOBAL_MARKER_V2,
-            artifact_binding,
-            atomic_json_dump,
-            atomic_text_write,
-            atomic_torch_save,
-            canonical_sha256,
-            quarantine_incomplete_global_checkpoint,
-            validate_global_checkpoint,
-        )
-
-        # path: given_path + `/global_step_{global_steps}` + `/actor`
-        local_global_step_folder = os.path.join(
-            self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
-        )
-
-        print(f"local_global_step_folder: {local_global_step_folder}")
-        actor_local_path = os.path.join(local_global_step_folder, "actor")
-        integrity_v2 = False
-        if self._is_ai4s_v6_full_parameter():
-            from training.contract import load_contract
-
-            integrity_v2 = (
-                load_contract()[0]["checkpoint"].get("integrity_schema")
-                == "sha256_all_payloads_v2"
-            )
-        completion_marker = os.path.join(local_global_step_folder, ".checkpoint_complete")
-        if integrity_v2:
-            quarantine_incomplete_global_checkpoint(
-                local_global_step_folder,
-                expected_step=self.global_steps,
-            )
-
-        actor_remote_path = (
-            None
-            if self.config.trainer.default_hdfs_dir is None
-            else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "actor")
-        )
-
-        remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
-        if remove_previous_ckpt_in_save:
-            print(
-                "Warning: remove_previous_ckpt_in_save is deprecated,"
-                + " set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead"
-            )
-        max_actor_ckpt_to_keep = (
-            self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
-        )
-        max_critic_ckpt_to_keep = (
-            self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
-        )
-
-        self.actor_rollout_wg.save_checkpoint(
-            actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
-        )
-
+        step_dir = os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")
+        actor_dir = os.path.join(step_dir, "actor")
+        keep = self.config.trainer.get("max_actor_ckpt_to_keep", None)
+        self.actor_rollout_wg.save_checkpoint(actor_dir, global_step=self.global_steps, max_ckpt_to_keep=keep)
         if self.use_critic:
-            critic_local_path = os.path.join(local_global_step_folder, str(Role.Critic))
-            critic_remote_path = (
-                None
-                if self.config.trainer.default_hdfs_dir is None
-                else os.path.join(
-                    self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", str(Role.Critic)
-                )
-            )
-            self.critic_wg.save_checkpoint(
-                critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep
-            )
-
-        # save dataloader
-        local_mkdir_safe(local_global_step_folder)
-        dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
-        dataloader_state_dict = self.train_dataloader.state_dict()
-        if integrity_v2:
-            atomic_torch_save(dataloader_state_dict, dataloader_local_path)
-        else:
-            torch.save(dataloader_state_dict, dataloader_local_path)
-
-        # Persist the best-candidate metadata inside the incoming checkpoint
-        # before committing it.  The root-level pointer must not move yet: a
-        # crash before the completion marker/tracker would otherwise leave it
-        # pointing at an incomplete checkpoint.
-        best_metadata_written = self._write_best_checkpoint_metadata(directory=local_global_step_folder)
-
-        # latest checkpointed iteration tracker (for atomic usage)
-        if (
-            hasattr(self.config.actor_rollout_ref.actor.checkpoint, "async_save")
-            and self.config.actor_rollout_ref.actor.checkpoint.async_save
-        ) or (
-            "async_save" in self.config.actor_rollout_ref.actor.checkpoint
-            and self.config.actor_rollout_ref.actor.checkpoint["async_save"]
-        ):
-            print("skip write latest_checkpointed_iteration.txt when async_save is True")
-            return
-        local_latest_checkpointed_iteration = os.path.join(
-            self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt"
-        )
-        # Commit the checkpoint only after all worker state and the dataloader
-        # state exist.  Retention ignores directories without this marker, so
-        # a crash during a future save cannot displace the last valid tracker
-        # target.  Both files use atomic replace to avoid torn metadata.
-        if integrity_v2:
-            global_artifacts = [
-                artifact_binding(local_global_step_folder, "actor/CHECKPOINT_COMPLETE.json"),
-                artifact_binding(local_global_step_folder, "data.pt"),
-            ]
-            global_artifacts.sort(key=lambda item: item["relative_path"])
-            global_manifest = {
-                "schema_version": GLOBAL_MARKER_V2,
-                "global_step": int(self.global_steps),
-                "artifacts": global_artifacts,
-                "artifact_inventory_sha256": canonical_sha256(global_artifacts),
-            }
-            atomic_json_dump(
-                global_manifest,
-                os.path.join(local_global_step_folder, GLOBAL_MANIFEST_NAME),
-            )
-            atomic_text_write(f"{self.global_steps}\n", completion_marker)
-            validate_global_checkpoint(
-                local_global_step_folder,
-                expected_step=self.global_steps,
-                allow_legacy_marker=False,
-            )
-        else:
-            completion_tmp = completion_marker + ".tmp"
-            with open(completion_tmp, "w", encoding="utf-8") as f:
-                f.write(f"{self.global_steps}\n")
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(completion_tmp, completion_marker)
-
-        if integrity_v2:
-            atomic_text_write(str(self.global_steps), local_latest_checkpointed_iteration)
-        else:
-            tracker_tmp = local_latest_checkpointed_iteration + ".tmp"
-            with open(tracker_tmp, "w", encoding="utf-8") as f:
-                f.write(str(self.global_steps))
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tracker_tmp, local_latest_checkpointed_iteration)
-        # The checkpoint is now durable and discoverable.  It is safe to move
-        # the root best pointer; if this write is interrupted, resume reconciles
-        # it from the committed step-local candidate above.
-        if best_metadata_written:
-            self._write_best_checkpoint_metadata()
-        self.actor_rollout_wg.finalize_checkpoint(actor_local_path, max_actor_ckpt_to_keep)
-        self._maybe_write_v6_monitoring_request(self.global_steps)
-
-    def _resolve_v6_monitoring_contract(self):
-        return None
-
-    def _maybe_write_v6_monitoring_request(self, global_step: int) -> Optional[str]:
-        return None
-
-    def _is_v6_monitoring_segment_boundary(self, global_step: int) -> bool:
-        """Return true only for a formal, science-gated V6 segment boundary.
-
-        One- and ten-step V6 smoke runs use the same full-parameter actor but
-        intentionally have no formal full-run monitoring contract.  They must
-        save their terminal checkpoint without attempting to index a missing
-        monitoring contract.
-        """
-
-        resolved = self._resolve_v6_monitoring_contract()
-        if resolved is None:
-            return False
-        evaluation_steps = {
-            int(step) for step in resolved["contract"]["monitoring"]["evaluation_steps"]
-            if int(step) > 0
-        }
-        return int(global_step) in evaluation_steps
-
-    def _require_v6_checkpoint_science_gate(self, global_step: int) -> Optional[dict[str, Any]]:
-        """Require an independently recomputed passing audit before a new segment."""
-
-        resolved = self._resolve_v6_monitoring_contract()
-        if resolved is None:
-            return None
-        evaluation_steps = [int(step) for step in resolved["contract"]["monitoring"]["evaluation_steps"]]
-        if global_step == 0:
-            return None
-        if global_step not in evaluation_steps:
-            raise RuntimeError(
-                f"Formal V6 resume step {global_step} is not a scientific segment boundary"
-            )
-        run_root = os.path.abspath(os.environ["VERL_V6_RUN_ROOT"])
-        from verl.trainer.ppo.v6_monitoring import validate_checkpoint_science_gate
-
-        return validate_checkpoint_science_gate(
-            run_root=run_root,
-            global_step=int(global_step),
-            baseline=resolved["baseline"],
-            require_pass=True,
-        )
-
-    def _set_v6_gpu_phase(self, phase: str) -> None:
-        """Publish the driver phase used by the out-of-process NVML sampler.
-
-        The file is evidence only: no training decision reads it.  Formal V6
-        launchers bind it inside the run root, and an atomic replace prevents
-        the sampler from observing a partial value.  A malformed path fails
-        closed instead of silently dropping the utilization evidence.
-        """
-
-        path = os.environ.get("VERL_V6_GPU_PHASE_FILE")
-        if path is None:
-            return
-        if phase not in {"idle", "rollout", "actor_update"}:
-            raise ValueError(f"Unsupported formal V6 GPU phase: {phase!r}")
-        if not os.path.isabs(path):
-            raise RuntimeError("VERL_V6_GPU_PHASE_FILE must be absolute")
-        run_root = os.environ.get("VERL_V6_RUN_ROOT")
-        if not isinstance(run_root, str) or not os.path.isabs(run_root):
-            raise RuntimeError("Formal V6 GPU phase evidence requires VERL_V6_RUN_ROOT")
-        expected = os.path.join(os.path.realpath(run_root), "audit", "gpu_phase.txt")
-        if os.path.realpath(path) != expected:
-            raise RuntimeError("Formal V6 GPU phase path is outside its canonical run root")
-        parent = os.path.dirname(path)
-        os.makedirs(parent, exist_ok=True)
-        if os.path.islink(path):
-            raise RuntimeError("Formal V6 GPU phase path must not be a symlink")
-        temporary = f"{path}.tmp.{os.getpid()}"
-        with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(phase + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
+            self.critic_wg.save_checkpoint(os.path.join(step_dir, str(Role.Critic)), global_step=self.global_steps,
+                                          max_ckpt_to_keep=self.config.trainer.get("max_critic_ckpt_to_keep", None))
+        torch.save(self.train_dataloader.state_dict(), os.path.join(step_dir, "data.pt"))
+        for path in (os.path.join(step_dir, ".checkpoint_complete"),
+                     os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")):
+            temporary = path + ".tmp"
+            with open(temporary, "w", encoding="utf-8") as handle:
+                handle.write(str(self.global_steps))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        self.actor_rollout_wg.finalize_checkpoint(actor_dir, keep)
 
     def _consider_best_checkpoint(self, val_metrics: dict[str, Any]) -> bool:
         if not self.best_metric_key:
@@ -4375,199 +2242,25 @@ class RayPPOTrainer:
         os.replace(temporary, destination)
         return True
 
-    def _load_best_checkpoint_metadata(self) -> None:
-        if not self.best_metric_key:
-            return
-        checkpoint_root = os.path.abspath(self.config.trainer.default_local_dir)
-        root_metadata = os.path.join(checkpoint_root, "best_checkpoint.json")
-        candidate_paths = []
-        if os.path.isfile(root_metadata):
-            candidate_paths.append(root_metadata)
-        for step in range(self.global_steps + 1):
-            step_metadata = os.path.join(checkpoint_root, f"global_step_{step}", "best_checkpoint.json")
-            if os.path.isfile(step_metadata):
-                candidate_paths.append(step_metadata)
-        if not candidate_paths:
-            return
-
-        candidates = []
-        errors = []
-        for path in candidate_paths:
-            try:
-                with open(path, encoding="utf-8") as handle:
-                    payload = json.load(handle)
-                if payload.get("metric_key") != self.best_metric_key or payload.get("metric_mode") != self.best_metric_mode:
-                    raise ValueError("validation contract mismatch")
-                value = float(payload["metric_value"])
-                step = int(payload["global_step"])
-                expected_step_path = os.path.join(checkpoint_root, f"global_step_{step}")
-                checkpoint_path = os.path.abspath(os.fspath(payload["checkpoint_path"]))
-                if not np.isfinite(value) or step < 0 or step > self.global_steps:
-                    raise ValueError("invalid or uncommitted metric step")
-                if checkpoint_path != expected_step_path:
-                    raise ValueError("checkpoint_path does not match the checkpoint root and global step")
-                if not os.path.isfile(os.path.join(checkpoint_path, "data.pt")):
-                    raise ValueError("checkpoint has no dataloader state")
-                marker = os.path.join(checkpoint_path, ".checkpoint_complete")
-                if not os.path.isfile(marker):
-                    raise ValueError("checkpoint has no matching atomic completion marker")
-                with open(marker, encoding="utf-8") as marker_handle:
-                    if marker_handle.read().strip() != str(step):
-                        raise ValueError("checkpoint has no matching atomic completion marker")
-                actor_path = os.path.join(checkpoint_path, "actor")
-                if not os.path.isdir(actor_path):
-                    raise ValueError("checkpoint has no actor state")
-                formal_v6 = self._is_ai4s_v6_full_parameter()
-                expected_world_size = 8 if formal_v6 else 4
-                for kind in ("model", "optim", "extra_state", "rollout_rng"):
-                    ranks = {
-                        int(match.group(1))
-                        for name in os.listdir(actor_path)
-                        if (
-                            match := re.fullmatch(
-                                rf"{kind}_world_size_{expected_world_size}_rank_(\d+)\.pt", name
-                            )
-                        )
-                    }
-                    if ranks != set(range(expected_world_size)):
-                        raise ValueError(
-                            f"checkpoint has incomplete {expected_world_size}-rank {kind} state: {sorted(ranks)}"
-                        )
-                required_artifacts = ["checkpoint_provenance.json"]
-                if formal_v6:
-                    # Full-parameter state lives entirely in the eight FSDP
-                    # shards.  Adapter/standalone-merger files are forbidden,
-                    # while the inner distributed commit marker is mandatory.
-                    required_artifacts.append("CHECKPOINT_COMPLETE.json")
-                    forbidden_artifacts = (
-                        "lora_adapter/adapter_model.safetensors",
-                        "native_visual_merger/model.safetensors",
-                        "native_visual_merger/manifest.json",
-                    )
-                    unexpected = [
-                        relative
-                        for relative in forbidden_artifacts
-                        if os.path.exists(os.path.join(actor_path, relative))
-                    ]
-                    if unexpected:
-                        raise ValueError(
-                            f"formal V6 checkpoint contains legacy actor artifacts: {unexpected}"
-                        )
-                else:
-                    required_artifacts.extend(
-                        (
-                            "lora_adapter/adapter_model.safetensors",
-                            "native_visual_merger/model.safetensors",
-                            "native_visual_merger/manifest.json",
-                        )
-                    )
-                for relative in required_artifacts:
-                    if not os.path.isfile(os.path.join(actor_path, relative)):
-                        raise ValueError(f"checkpoint is missing committed actor artifact: {relative}")
-                candidates.append((value, step))
-            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                errors.append(f"{path}: {exc}")
-        if not candidates:
-            raise ValueError("No valid committed best-checkpoint metadata remains: " + "; ".join(errors))
-
-        if self.best_metric_mode == "max":
-            value, step = max(candidates, key=lambda item: (item[0], -item[1]))
-        else:
-            value, step = min(candidates, key=lambda item: (item[0], item[1]))
-        self.best_metric_value = value
-        self.best_metric_step = step
-        # Reconcile a stale/missing root pointer after a crash between tracker
-        # commit and the root metadata replace.
-        self._write_best_checkpoint_metadata(require_current_step=False)
-
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
+            self.actor_rollout_wg.load_checkpoint(None)
             return 0
-
-        integrity_v2 = False
-        if self._is_ai4s_v6_full_parameter():
-            from training.contract import load_contract
-
-            integrity_v2 = (
-                load_contract()[0]["checkpoint"].get("integrity_schema")
-                == "sha256_all_payloads_v2"
-            )
-
-        # load from hdfs
-        if self.config.trainer.default_hdfs_dir is not None:
-            raise NotImplementedError("load from hdfs is not implemented yet")
+        if self.config.trainer.resume_mode == "resume_path":
+            step_dir = self.config.trainer.resume_from_path
         else:
-            checkpoint_folder = self.config.trainer.default_local_dir  # TODO: check path
-            if not os.path.isabs(checkpoint_folder):
-                working_dir = os.getcwd()
-                checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
-            global_step_folder = find_latest_ckpt_path(
-                checkpoint_folder,
-                allow_legacy_marker=not integrity_v2,
-            )  # None if no latest
-
-        # find global_step_folder
-        if self.config.trainer.resume_mode == "auto":
-            if global_step_folder is None:
-                print("Training from scratch")
-                return 0
-        else:
-            if self.config.trainer.resume_mode == "resume_path":
-                assert isinstance(self.config.trainer.resume_from_path, str), "resume ckpt must be str type"
-                assert "global_step_" in self.config.trainer.resume_from_path, (
-                    "resume ckpt must specify the global_steps"
-                )
-                global_step_folder = self.config.trainer.resume_from_path
-                if not os.path.isabs(global_step_folder):
-                    working_dir = os.getcwd()
-                    global_step_folder = os.path.join(working_dir, global_step_folder)
-        print(f"Load from checkpoint folder: {global_step_folder}")
-        # set global step
-        self.global_steps = int(global_step_folder.split("global_step_")[-1])
-
-        print(f"Setting global step to {self.global_steps}")
-        print(f"Resuming from {global_step_folder}")
-
-        from verl.utils.checkpoint.integrity import validate_global_checkpoint
-
-        # Validate data.pt and the recursively hash-bound actor marker before
-        # any worker or controller calls torch.load.
-        validate_global_checkpoint(
-            global_step_folder,
-            expected_step=self.global_steps,
-            allow_legacy_marker=not integrity_v2,
-        )
-
-        actor_path = os.path.join(global_step_folder, "actor")
-        critic_path = os.path.join(global_step_folder, str(Role.Critic))
-        # load actor
-        self.actor_rollout_wg.load_checkpoint(
-            actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
-        )
-        # load critic
+            step_dir = find_latest_ckpt_path(self.config.trainer.default_local_dir)
+        if step_dir is None:
+            self.actor_rollout_wg.load_checkpoint(None)
+            return 0
+        self.global_steps = int(os.path.basename(step_dir).split("global_step_")[-1])
+        self.actor_rollout_wg.load_checkpoint(os.path.join(step_dir, "actor"),
+                                             del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
         if self.use_critic:
-            self.critic_wg.load_checkpoint(
-                critic_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
-            )
-
-        # load dataloader,
-        # TODO: from remote not implemented yet
-        dataloader_local_path = os.path.join(global_step_folder, "data.pt")
-        if not os.path.exists(dataloader_local_path):
-            raise FileNotFoundError(
-                f"Committed checkpoint is missing data.pt; exact resume is impossible: {dataloader_local_path}"
-            )
-        dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
-        self.train_dataloader.load_state_dict(dataloader_state_dict)
-        restore_exact = _nested_exact_equal(
-            dataloader_state_dict, self.train_dataloader.state_dict()
-        )
-        if self._is_ai4s_v6_full_parameter():
-            self._v6_dataloader_restore_exact = restore_exact
-        else:
-            self._exp3_dataloader_restore_exact = restore_exact
-        if not restore_exact:
-            raise RuntimeError("Dataloader state differs immediately after checkpoint restore")
+            self.critic_wg.load_checkpoint(os.path.join(step_dir, str(Role.Critic)),
+                                          del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
+        state = torch.load(os.path.join(step_dir, "data.pt"), weights_only=False)
+        self.train_dataloader.load_state_dict(state)
         return self.global_steps
 
     def _start_profiling(self, do_profile: bool) -> None:
@@ -4708,7 +2401,7 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
-    def _balance_v6_rollout_uid_groups(
+    def _balance_rollout_uid_groups(
         self, repeated_prompts: DataProto
     ) -> tuple[DataProto, torch.Tensor | None, dict[str, float]]:
         """Balance same-UID rollout groups across ranks and return an exact inverse.
@@ -4982,337 +2675,11 @@ class RayPPOTrainer:
             critic_output = self.critic_wg.update_critic(batch)
         return critic_output
 
-    def _exp3_rollout_state_digests(self) -> list[dict[str, Any]]:
-        states = self.actor_rollout_wg.exp3_rollout_state_digest()
-        if not isinstance(states, list) or len(states) != 4:
-            raise RuntimeError(f"Exp3 rollout-state audit expected four rank results, got {states!r}")
-        states = sorted(states, key=lambda item: int(item["rank"]))
-        if [int(item["rank"]) for item in states] != list(range(4)):
-            raise RuntimeError(f"Exp3 rollout-state audit rank coverage is invalid: {states!r}")
-        if any(int(item.get("world_size", -1)) != 4 for item in states):
-            raise RuntimeError(f"Exp3 rollout-state audit world-size mismatch: {states!r}")
-        return states
 
-    def _write_exp3_post_checkpoint_rollout_golden(self, probe: DataProto, audit_dir: str) -> None:
-        """Exercise post-update replica sync from the exact checkpoint RNG."""
 
-        os.makedirs(audit_dir, exist_ok=False)
-        input_path = os.path.join(audit_dir, "input.dataproto")
-        output_path = os.path.join(audit_dir, "expected_output.dataproto")
-        _atomic_dataproto_file(input_path, probe)
-        output = self.actor_rollout_wg.generate_sequences(deepcopy(probe))
-        output.meta_info.pop("timing", None)
-        states = self._exp3_rollout_state_digests()
-        _atomic_dataproto_file(output_path, output)
-        _atomic_json_file(
-            os.path.join(audit_dir, "golden.json"),
-            {
-                "schema_version": "exp3_post_checkpoint_next_rollout_v1",
-                "passed": True,
-                "global_step": self.global_steps,
-                "world_size": 4,
-                "input_path": os.path.abspath(input_path),
-                "expected_output_path": os.path.abspath(output_path),
-                "post_rollout_rank_states": states,
-            },
-        )
 
-    def _verify_exp3_fresh_next_rollout(self, audit_dir: str) -> dict[str, Any]:
-        golden_path = os.path.join(audit_dir, "golden.json")
-        if not os.path.isfile(golden_path):
-            raise FileNotFoundError(f"Exp3 next-rollout golden manifest is missing: {golden_path}")
-        with open(golden_path, encoding="utf-8") as handle:
-            golden = json.load(handle)
-        if (
-            golden.get("schema_version") != "exp3_post_checkpoint_next_rollout_v1"
-            or golden.get("passed") is not True
-            or int(golden.get("global_step", -1)) != self.global_steps
-            or int(golden.get("world_size", -1)) != 4
-        ):
-            raise RuntimeError(f"Exp3 next-rollout golden contract is invalid: {golden}")
-        input_path = os.path.abspath(golden["input_path"])
-        expected_path = os.path.abspath(golden["expected_output_path"])
-        expected_parent = os.path.abspath(audit_dir) + os.sep
-        if not input_path.startswith(expected_parent) or not expected_path.startswith(expected_parent):
-            raise RuntimeError("Exp3 next-rollout golden paths escape the audited directory")
-        probe = DataProto.load_from_disk(input_path)
-        expected = DataProto.load_from_disk(expected_path)
-        actual = self.actor_rollout_wg.generate_sequences(probe)
-        actual.meta_info.pop("timing", None)
-        states = self._exp3_rollout_state_digests()
-        gates = _exp3_rollout_exact_gates(expected, actual)
-        gates.update(
-            {
-                "post_rollout_rng_states_bitwise_exact": states == golden.get("post_rollout_rank_states"),
-                "native_rollout_replica_resynchronized_on_all_ranks": all(
-                    item.get("native_rollout_replica_enabled") is True
-                    and item.get("native_rollout_replica_dirty") is False
-                    for item in states
-                ),
-            }
-        )
-        return {
-            "schema_version": "exp3_fresh_process_next_rollout_v1",
-            "passed": all(gates.values()),
-            "failed_gates": sorted(key for key, value in gates.items() if not value),
-            "gates": gates,
-            "global_step": self.global_steps,
-            "world_size": 4,
-            "post_rollout_rank_states": states,
-        }
 
-    def _v6_rollout_state_digests(self) -> list[dict[str, Any]]:
-        """Collect the independent eight-rank formal rollout-state schema."""
 
-        states = self.actor_rollout_wg.v6_rollout_state_digest()
-        if not isinstance(states, list) or len(states) != 8:
-            raise RuntimeError(f"V6 rollout-state audit expected eight rank results, got {states!r}")
-        states = sorted(states, key=lambda item: int(item["rank"]))
-        if [int(item["rank"]) for item in states] != list(range(8)):
-            raise RuntimeError(f"V6 rollout-state audit rank coverage is invalid: {states!r}")
-        is_v8 = self._formal_compressor_algorithm() == "qwen35_cdpruner_v1"
-        expected_schema = (
-            "vision_opd_ai4s_v8_rollout_state_v1"
-            if is_v8
-            else "vision_opd_ai4s_v6_rollout_state_v2"
-        )
-        if any(
-            item.get("schema_version") != expected_schema
-            or int(item.get("world_size", -1)) != 8
-            or item.get("native_rollout_replica_dirty") is not False
-            or item.get("native_rollout_replica_parked") is not True
-            for item in states
-        ):
-            raise RuntimeError(f"V6 rollout-state audit contract mismatch: {states!r}")
-        if is_v8:
-            from training.contract import load_contract
-            from verl.models.transformers.visual_token_curriculum import (
-                VisualTokenCurriculum,
-            )
-
-            release_contract, _ = load_contract()
-            curriculum = VisualTokenCurriculum.from_mapping(
-                release_contract["compressor"]["curriculum"]
-            )
-            expected_keys = {
-                "schema_version",
-                "rank",
-                "world_size",
-                "torch_random_state_sha256",
-                "generation_random_state_sha256",
-                "native_rollout_replica_enabled",
-                "native_rollout_replica_dirty",
-                "native_rollout_replica_parked",
-                "visual_token_curriculum_state",
-            }
-            canonical_states = []
-            for item in states:
-                if set(item) != expected_keys:
-                    raise RuntimeError(f"V8 rollout-state audit has a non-canonical inventory: {item!r}")
-                state = item.get("visual_token_curriculum_state")
-                if not isinstance(state, dict):
-                    raise RuntimeError(f"V8 rollout-state audit has no curriculum state: {item!r}")
-                completed = state.get("completed_optimizer_steps")
-                if isinstance(completed, bool) or not isinstance(completed, int):
-                    raise RuntimeError(f"V8 rollout-state audit has an invalid curriculum step: {item!r}")
-                expected_state = curriculum.runtime_state(completed)
-                if state != expected_state:
-                    raise RuntimeError(
-                        "V8 rollout-state audit curriculum schedule/control state drift: "
-                        f"expected={expected_state!r}, actual={state!r}"
-                    )
-                canonical_states.append(state)
-            if any(state != canonical_states[0] for state in canonical_states[1:]):
-                raise RuntimeError(
-                    "V8 rollout-state audit found a curriculum state disagreement across ranks: "
-                    f"{canonical_states!r}"
-                )
-        return states
-
-    def _write_v6_post_checkpoint_rollout_golden(self, probe: DataProto, audit_dir: str) -> None:
-        """Bind a post-checkpoint rollout and RNG state to the eight-rank V6 run."""
-
-        os.makedirs(audit_dir, exist_ok=False)
-        input_path = os.path.join(audit_dir, "input.dataproto")
-        output_path = os.path.join(audit_dir, "expected_output.dataproto")
-        algorithm = self._formal_compressor_algorithm()
-        is_v8 = algorithm == "qwen35_cdpruner_v1"
-        curriculum_state = None
-        if is_v8:
-            from training.contract import load_contract
-            from verl.models.transformers.visual_token_curriculum import (
-                VisualTokenCurriculum,
-            )
-
-            release_contract, _ = load_contract()
-            curriculum = VisualTokenCurriculum.from_mapping(
-                release_contract["compressor"]["curriculum"]
-            )
-            # Checkpoint S commits update S.  The first rollout after restoring
-            # that checkpoint must therefore use completed=S, not the state
-            # completed=S-1 that produced update S's training rollout.
-            curriculum_state = _post_checkpoint_next_curriculum_state(
-                curriculum, int(self.global_steps)
-            )
-            probe.meta_info.update(
-                {
-                    "visual_token_curriculum_schema_version": curriculum_state[
-                        "schema_version"
-                    ],
-                    "visual_token_curriculum_schedule_sha256": curriculum_state[
-                        "schedule_sha256"
-                    ],
-                    "visual_token_curriculum_completed_steps": curriculum_state[
-                        "completed_optimizer_steps"
-                    ],
-                    "visual_token_retention_bps": curriculum_state["retention_bps"],
-                }
-            )
-            self.actor_rollout_wg.set_visual_token_curriculum_step(
-                completed_optimizer_steps=curriculum_state[
-                    "completed_optimizer_steps"
-                ]
-            )
-        _atomic_dataproto_file(input_path, probe)
-        output = self.actor_rollout_wg.generate_sequences(deepcopy(probe))
-        output.meta_info.pop("timing", None)
-        states = self._v6_rollout_state_digests()
-        _atomic_dataproto_file(output_path, output)
-        payload = {
-            "schema_version": (
-                "vision_opd_ai4s_v8_post_checkpoint_next_rollout_v1"
-                if is_v8
-                else "vision_opd_ai4s_v6_post_checkpoint_next_rollout_v1"
-            ),
-            "passed": True,
-            "global_step": self.global_steps,
-            "world_size": 8,
-            "input_path": os.path.abspath(input_path),
-            "expected_output_path": os.path.abspath(output_path),
-            "post_rollout_rank_states": states,
-        }
-        if is_v8:
-            payload["algorithm"] = algorithm
-            payload["visual_token_curriculum_state"] = curriculum_state
-        _atomic_json_file(
-            os.path.join(audit_dir, "golden.json"),
-            payload,
-        )
-
-    def _verify_v6_fresh_next_rollout(self, audit_dir: str) -> dict[str, Any]:
-        golden_path = os.path.join(audit_dir, "golden.json")
-        if not os.path.isfile(golden_path):
-            raise FileNotFoundError(f"V6 next-rollout golden manifest is missing: {golden_path}")
-        with open(golden_path, encoding="utf-8") as handle:
-            golden = json.load(handle)
-        algorithm = self._formal_compressor_algorithm()
-        is_v8 = algorithm == "qwen35_cdpruner_v1"
-        expected_schema = (
-            "vision_opd_ai4s_v8_post_checkpoint_next_rollout_v1"
-            if is_v8
-            else "vision_opd_ai4s_v6_post_checkpoint_next_rollout_v1"
-        )
-        curriculum_state = None
-        if is_v8:
-            from training.contract import load_contract
-            from verl.models.transformers.visual_token_curriculum import (
-                VisualTokenCurriculum,
-            )
-
-            release_contract, _ = load_contract()
-            curriculum = VisualTokenCurriculum.from_mapping(
-                release_contract["compressor"]["curriculum"]
-            )
-            # A restored checkpoint at S must reproduce the next rollout with
-            # exactly S optimizer updates already committed.
-            curriculum_state = _post_checkpoint_next_curriculum_state(
-                curriculum, int(self.global_steps)
-            )
-        if (
-            golden.get("schema_version") != expected_schema
-            or golden.get("passed") is not True
-            or int(golden.get("global_step", -1)) != self.global_steps
-            or int(golden.get("world_size", -1)) != 8
-            or (is_v8 and golden.get("algorithm") != algorithm)
-            or (
-                is_v8
-                and golden.get("visual_token_curriculum_state") != curriculum_state
-            )
-        ):
-            raise RuntimeError(f"V6 next-rollout golden contract is invalid: {golden}")
-        input_path = os.path.abspath(golden["input_path"])
-        expected_path = os.path.abspath(golden["expected_output_path"])
-        expected_parent = os.path.abspath(audit_dir) + os.sep
-        if not input_path.startswith(expected_parent) or not expected_path.startswith(expected_parent):
-            raise RuntimeError("V6 next-rollout golden paths escape the audited directory")
-        probe = DataProto.load_from_disk(input_path)
-        expected = DataProto.load_from_disk(expected_path)
-        if is_v8:
-            probe_curriculum = {
-                "schema_version": probe.meta_info.get(
-                    "visual_token_curriculum_schema_version"
-                ),
-                "schedule_sha256": probe.meta_info.get(
-                    "visual_token_curriculum_schedule_sha256"
-                ),
-                "completed_optimizer_steps": probe.meta_info.get(
-                    "visual_token_curriculum_completed_steps"
-                ),
-                "retention_bps": probe.meta_info.get("visual_token_retention_bps"),
-            }
-            if probe_curriculum != {
-                key: curriculum_state[key] for key in probe_curriculum
-            }:
-                raise RuntimeError("fresh-process golden probe curriculum metadata drift")
-            self.actor_rollout_wg.set_visual_token_curriculum_step(
-                completed_optimizer_steps=curriculum_state[
-                    "completed_optimizer_steps"
-                ]
-            )
-        actual = self.actor_rollout_wg.generate_sequences(probe)
-        actual.meta_info.pop("timing", None)
-        states = self._v6_rollout_state_digests()
-        gates = (
-            _v8_rollout_exact_gates(expected, actual)
-            if is_v8
-            else _v6_rollout_exact_gates(expected, actual)
-        )
-        gates.update(
-            {
-                "post_rollout_rng_states_bitwise_exact": states == golden.get("post_rollout_rank_states"),
-                "hf_replicated_rollout_clean_and_parked_on_all_ranks": all(
-                    item.get("native_rollout_replica_dirty") is False
-                    and item.get("native_rollout_replica_parked") is True
-                    for item in states
-                ),
-                **(
-                    {"curriculum_runtime_state_exact": True}
-                    if is_v8
-                    else {}
-                ),
-            }
-        )
-        return {
-            "schema_version": (
-                "vision_opd_ai4s_v8_fresh_process_next_rollout_v1"
-                if is_v8
-                else "vision_opd_ai4s_v6_fresh_process_next_rollout_v1"
-            ),
-            "passed": all(gates.values()),
-            "failed_gates": sorted(key for key, value in gates.items() if not value),
-            "gates": gates,
-            "global_step": self.global_steps,
-            "world_size": 8,
-            "post_rollout_rank_states": states,
-            **(
-                {
-                    "algorithm": algorithm,
-                    "visual_token_curriculum_state": curriculum_state,
-                }
-                if is_v8
-                else {}
-            ),
-        }
 
     def fit(self):
         """
@@ -5334,113 +2701,9 @@ class RayPPOTrainer:
         )
 
         self.global_steps = 0
-        self._reject_v6_legacy_audit_controls()
 
         # load checkpoint before doing anything
         loaded_step = self._load_checkpoint()
-        self._load_best_checkpoint_metadata()
-
-        formal_v6 = self._is_ai4s_v6_full_parameter()
-        formal_v8 = formal_v6 and self._is_ai4s_v8_cdpruner()
-        self._resolve_v6_monitoring_contract()
-        if formal_v6:
-            self._set_v6_gpu_phase("idle")
-        if loaded_step > 0:
-            # Reconcile the narrow crash window after checkpoint commit but
-            # before queue creation. Existing exact requests are only verified.
-            self._maybe_write_v6_monitoring_request(loaded_step)
-        fresh_audit_dir = os.environ.get(
-            "VERL_V6_FRESH_LOAD_AUDIT_DIR" if formal_v6 else "VERL_EXP3_FRESH_LOAD_AUDIT_DIR"
-        )
-        if fresh_audit_dir:
-            if loaded_step <= 0:
-                raise RuntimeError(
-                    f"{'V6' if formal_v6 else 'Exp3'} fresh-process audit requires a committed checkpoint"
-                )
-            audit_world_size = 8 if formal_v6 else 4
-            worker_paths = [
-                os.path.join(fresh_audit_dir, f"worker_rank{rank}.json")
-                for rank in range(audit_world_size)
-            ]
-            missing = [path for path in worker_paths if not os.path.isfile(path)]
-            if missing:
-                raise RuntimeError(f"Fresh-process worker audit artifacts are missing: {missing}")
-            workers = []
-            for path in worker_paths:
-                with open(path, encoding="utf-8") as handle:
-                    workers.append(json.load(handle))
-            expected_worker_schema = (
-                "vision_opd_ai4s_v6_full_parameter_fresh_worker_load_v1"
-                if formal_v6
-                else "exp3_fresh_process_worker_load_v1"
-            )
-            if [worker.get("rank") for worker in workers] != list(range(audit_world_size)) or not all(
-                worker.get("schema_version") == expected_worker_schema
-                and int(worker.get("world_size", -1)) == audit_world_size
-                and worker.get("passed") is True
-                for worker in workers
-            ):
-                raise RuntimeError(f"Fresh-process worker audit failed: {workers}")
-            next_rollout_dir = os.environ.get(
-                "VERL_V6_NEXT_ROLLOUT_AUDIT_DIR" if formal_v6 else "VERL_EXP3_NEXT_ROLLOUT_AUDIT_DIR"
-            )
-            if not next_rollout_dir:
-                raise RuntimeError(
-                    f"{'V6' if formal_v6 else 'Exp3'} fresh-process audit requires its next-rollout audit dir"
-                )
-            next_rollout = (
-                self._verify_v6_fresh_next_rollout(next_rollout_dir)
-                if formal_v6
-                else self._verify_exp3_fresh_next_rollout(next_rollout_dir)
-            )
-            gates = {
-                "loaded_committed_checkpoint": loaded_step > 0,
-                "dataloader_state_exact": bool(
-                    getattr(
-                        self,
-                        "_v6_dataloader_restore_exact" if formal_v6 else "_exp3_dataloader_restore_exact",
-                        False,
-                    )
-                ),
-                "all_worker_load_audits_passed": len(workers) == audit_world_size and all(
-                    worker["passed"] for worker in workers
-                ),
-                "loaded_step_matches_training_horizon": loaded_step == self.total_training_steps,
-                "next_rollout_and_rng_bitwise_exact": next_rollout["passed"] is True,
-            }
-            payload = {
-                "schema_version": (
-                    (
-                        "vision_opd_ai4s_v8_full_parameter_fresh_process_restore_v1"
-                        if formal_v8
-                        else "vision_opd_ai4s_v6_full_parameter_fresh_process_restore_v1"
-                    )
-                    if formal_v6
-                    else "exp3_fresh_process_restore_v1"
-                ),
-                "world_size": audit_world_size,
-                "passed": all(gates.values()),
-                "failed_gates": sorted(key for key, value in gates.items() if not value),
-                "gates": gates,
-                "loaded_step": loaded_step,
-                "worker_audits": workers,
-                "next_rollout_audit": next_rollout,
-                **(
-                    {"algorithm": "qwen35_cdpruner_v1"}
-                    if formal_v8
-                    else {}
-                ),
-            }
-            _atomic_json_file(os.path.join(fresh_audit_dir, "driver.json"), payload)
-            if not payload["passed"]:
-                raise RuntimeError(
-                    f"{'V6' if formal_v6 else 'Exp3'} fresh-process restore audit failed: {payload}"
-                )
-            print(
-                f"{'V6' if formal_v6 else 'Exp3'} fresh-process checkpoint and next-rollout audit passed; "
-                "exiting without another update."
-            )
-            return
 
         if loaded_step >= self.total_training_steps:
             print(
@@ -5561,46 +2824,29 @@ class RayPPOTrainer:
                             ),
                         }
                     )
-                next_rollout_audit_dir = os.environ.get(
-                    "VERL_V6_NEXT_ROLLOUT_AUDIT_DIR"
-                    if formal_v6
-                    else "VERL_EXP3_NEXT_ROLLOUT_AUDIT_DIR"
-                )
-                next_rollout_probe = (
-                    deepcopy(gen_batch)
-                    if next_rollout_audit_dir and self.global_steps >= self.total_training_steps
-                    else None
-                )
                 gen_batch_output = gen_batch.repeat(
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
                 )
                 gen_batch_output, rollout_inverse_order, rollout_balance_metrics = (
-                    self._balance_v6_rollout_uid_groups(gen_batch_output)
+                    self._balance_rollout_uid_groups(gen_batch_output)
                 )
                 metrics.update(rollout_balance_metrics)
 
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     # generate a batch
-                    if formal_v6:
-                        self._set_v6_gpu_phase("rollout")
-                    try:
-                        with marked_timer("gen", timing_raw, color="red"):
-                            if not self.async_rollout_mode:
-                                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
-                            else:
-                                gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                    with marked_timer("gen", timing_raw, color="red"):
+                        if not self.async_rollout_mode:
+                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
+                        else:
+                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
 
-                            timing_raw.update(gen_batch_output.meta_info["timing"])
-                            gen_batch_output.meta_info.pop("timing", None)
-                            if rollout_inverse_order is not None:
-                                # Restore the original interleaved trajectory
-                                # order before unioning with batch.repeat().
-                                gen_batch_output.reorder(rollout_inverse_order)
-                    finally:
-                        if formal_v6:
-                            self._set_v6_gpu_phase("idle")
-
+                        timing_raw.update(gen_batch_output.meta_info["timing"])
+                        gen_batch_output.meta_info.pop("timing", None)
+                        if rollout_inverse_order is not None:
+                            # Restore the original interleaved trajectory
+                            # order before unioning with batch.repeat().
+                            gen_batch_output.reorder(rollout_inverse_order)
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         if self.reward_fn is None:
                             raise ValueError("A reward_fn is required for REMAX advantage estimation.")
@@ -5910,41 +3156,9 @@ class RayPPOTrainer:
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
-                        smoke_audit_dir = self.config.trainer.get("dart_smoke_audit_dir", None)
-                        if smoke_audit_dir:
-                            smoke_steps = int(self.config.trainer.total_training_steps)
-                            if formal_v6:
-                                if smoke_steps not in {1, 10}:
-                                    raise RuntimeError(
-                                        "Formal V6 trainer.dart_smoke_audit_dir is restricted to 1/10-step probes"
-                                    )
-                                self._dump_v6_dpc_smoke_audit(batch, smoke_audit_dir)
-                            else:
-                                if smoke_steps != 1:
-                                    raise RuntimeError(
-                                        "trainer.dart_smoke_audit_dir is restricted to one-step legacy smoke runs"
-                                    )
-                                self._dump_dart_smoke_audit(batch, smoke_audit_dir)
-                        # update actor
-                        if formal_v6:
-                            self._set_v6_gpu_phase("actor_update")
-                        try:
-                            with marked_timer("update_actor", timing_raw, color="red"):
-                                actor_output = self._update_actor(batch)
-                        finally:
-                            if formal_v6:
-                                self._set_v6_gpu_phase("idle")
+                        with marked_timer("update_actor", timing_raw, color="red"):
+                            actor_output = self._update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-                        if formal_v6:
-                            from training.contract import load_contract
-
-                            warmup_semantics = load_contract()[0]["optimizer"].get(
-                                "warmup_update_indexing", "zero_based_legacy_v1"
-                            )
-                            _require_v6_single_finite_actor_update(
-                                actor_output_metrics,
-                                require_nonzero_lr=warmup_semantics == "one_based_nonzero_v2",
-                            )
                         metrics.update(actor_output_metrics)
 
                     # Log rollout generations if enabled
@@ -5965,36 +3179,10 @@ class RayPPOTrainer:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
 
-                # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
-                esi_close_to_expiration = should_save_ckpt_esi(
-                    max_steps_duration=self.max_steps_duration,
-                    redundant_time=self.config.trainer.esi_redundant_time,
-                )
-                # Check if the conditions for saving a checkpoint are met.
-                # The conditions include a mandatory condition (1) and
-                # one of the following optional conditions (2/3/4):
-                # 1. The save frequency is set to a positive value.
-                # 2. It's the last training step.
-                # 3. The current step number is a multiple of the save frequency.
-                # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
-                if is_last_step or best_improved or (self.config.trainer.save_freq > 0 and (
-                    self.global_steps % self.config.trainer.save_freq == 0 or esi_close_to_expiration
-                )):
-                    if esi_close_to_expiration:
-                        print("Force saving checkpoint: ESI instance expiration approaching.")
+                if is_last_step or best_improved or (self.config.trainer.save_freq > 0 and
+                    self.global_steps % self.config.trainer.save_freq == 0):
                     with marked_timer("save_checkpoint", timing_raw, color="green"):
                         self._save_checkpoint()
-                    if is_last_step and next_rollout_probe is not None:
-                        if formal_v6:
-                            self._write_v6_post_checkpoint_rollout_golden(
-                                next_rollout_probe,
-                                next_rollout_audit_dir,
-                            )
-                        else:
-                            self._write_exp3_post_checkpoint_rollout_golden(
-                                next_rollout_probe,
-                                next_rollout_audit_dir,
-                            )
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (
@@ -6044,12 +3232,6 @@ class RayPPOTrainer:
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
-
-                if not formal_v6:
-                    _audit_exp3_migrated_step301(
-                        metrics,
-                        self.config.trainer.get("rollout_data_dir", None),
-                    )
 
                 progress_bar.update(1)
                 self.global_steps += 1

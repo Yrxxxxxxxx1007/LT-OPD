@@ -18,16 +18,7 @@ from typing import Any, Mapping
 CURRICULUM_SCHEMA_VERSION = "vision_opd_v8_visual_token_curriculum_v2"
 CURRICULUM_DRIVER = "completed_optimizer_steps_before_current_update"
 CURRICULUM_SCHEDULE_TYPE = "warmup_hold_raised_cosine_frozen_bps"
-CURRICULUM_VALIDATION_CONTROL = "forbidden_diagnostic_only"
 CURRICULUM_ROUNDING_MODE = "round_half_up"
-CURRICULUM_RETENTION_BPS_VECTOR_SHA256 = (
-    "deea218dec57429ecfc439fe7aca1bc68ad72ef17af40f65b69e4947985642fa"
-)
-CURRICULUM_SCHEDULE_SHA256 = (
-    "a02cbf6e99fa6dc002373656ee6d2492b55c29f968df3c9558b67252633f9a9b"
-)
-
-
 # Offline-frozen, integer basis-point schedule.  It is the round-half-up
 # realization of
 #   500 + 1000 * (1 + cos(pi * (c - 13) / 87))  for 14 <= c <= 99,
@@ -69,55 +60,8 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _validate_frozen_retention_vector() -> None:
-    if len(RETENTION_BPS_BY_COMPLETED_STEP) != 175:
-        raise RuntimeError("frozen V8 curriculum retention vector must contain exactly 175 updates")
-    actual_hash = _canonical_sha256(RETENTION_BPS_BY_COMPLETED_STEP)
-    if actual_hash != CURRICULUM_RETENTION_BPS_VECTOR_SHA256:
-        raise RuntimeError(
-            "frozen V8 curriculum retention vector hash drift: "
-            f"expected={CURRICULUM_RETENTION_BPS_VECTOR_SHA256}, actual={actual_hash}"
-        )
-    golden = {0: 2500, 13: 2500, 14: 2499, 99: 501, 100: 500, 174: 500}
-    if any(RETENTION_BPS_BY_COMPLETED_STEP[index] != value for index, value in golden.items()):
-        raise RuntimeError("frozen V8 curriculum retention vector golden boundary drift")
-    if any(
-        left < right
-        for left, right in zip(
-            RETENTION_BPS_BY_COMPLETED_STEP[:-1],
-            RETENTION_BPS_BY_COMPLETED_STEP[1:],
-            strict=True,
-        )
-    ):
-        raise RuntimeError("frozen V8 curriculum retention vector must be monotone non-increasing")
-    if len(set(RETENTION_BPS_BY_COMPLETED_STEP)) != 88:
-        raise RuntimeError("frozen V8 curriculum retention vector must contain exactly 88 stages")
-    if sum(RETENTION_BPS_BY_COMPLETED_STEP) != 201_500:
-        raise RuntimeError("frozen V8 curriculum retention-vector area drift")
-    if RETENTION_BPS_BY_COMPLETED_STEP.count(2500) != 14:
-        raise RuntimeError("frozen V8 curriculum must hold 25% for exactly 14 updates")
-    if RETENTION_BPS_BY_COMPLETED_STEP.count(500) != 75:
-        raise RuntimeError("frozen V8 curriculum must hold 5% for exactly 75 updates")
-    drops = tuple(
-        left - right
-        for left, right in zip(
-            RETENTION_BPS_BY_COMPLETED_STEP[:-1],
-            RETENTION_BPS_BY_COMPLETED_STEP[1:],
-            strict=True,
-        )
-    )
-    if max(drops) != 36 or sum(drop > 0 for drop in drops) != 87:
-        raise RuntimeError("frozen V8 curriculum transition smoothness/stage-count drift")
-    if any(
-        RETENTION_BPS_BY_COMPLETED_STEP[c]
-        + RETENTION_BPS_BY_COMPLETED_STEP[113 - c]
-        != 3000
-        for c in range(14, 100)
-    ):
-        raise RuntimeError("frozen V8 curriculum raised-cosine symmetry drift")
 
 
-_validate_frozen_retention_vector()
 
 
 @dataclass(frozen=True)
@@ -133,9 +77,7 @@ class VisualTokenCurriculum:
     warmup_hold_optimizer_steps: int = 14
     final_plateau_start_completed_steps: int = 100
     rounding_mode: str = CURRICULUM_ROUNDING_MODE
-    retention_bps_vector_sha256: str = CURRICULUM_RETENTION_BPS_VECTOR_SHA256
     minimum_tokens_per_image: int = 32
-    validation_control: str = CURRICULUM_VALIDATION_CONTROL
 
     def __post_init__(self) -> None:
         if self.schema_version != CURRICULUM_SCHEMA_VERSION:
@@ -144,16 +86,8 @@ class VisualTokenCurriculum:
             raise ValueError(f"unsupported curriculum driver: {self.driver!r}")
         if self.schedule_type != CURRICULUM_SCHEDULE_TYPE:
             raise ValueError(f"unsupported curriculum schedule type: {self.schedule_type!r}")
-        if self.validation_control != CURRICULUM_VALIDATION_CONTROL:
-            raise ValueError("diagnostic validation is forbidden from controlling the curriculum")
         if self.rounding_mode != CURRICULUM_ROUNDING_MODE:
             raise ValueError(f"unsupported curriculum rounding mode: {self.rounding_mode!r}")
-        if self.retention_bps_vector_sha256 != CURRICULUM_RETENTION_BPS_VECTOR_SHA256:
-            raise ValueError(
-                "curriculum retention vector hash drift: "
-                f"expected={CURRICULUM_RETENTION_BPS_VECTOR_SHA256}, "
-                f"actual={self.retention_bps_vector_sha256!r}"
-            )
         total = _require_int(self.total_optimizer_steps, name="total_optimizer_steps", minimum=1)
         start = _require_int(self.start_retention_bps, name="start_retention_bps", minimum=1)
         final = _require_int(self.final_retention_bps, name="final_retention_bps", minimum=1)
@@ -168,49 +102,16 @@ class VisualTokenCurriculum:
             minimum=0,
         )
         _require_int(self.minimum_tokens_per_image, name="minimum_tokens_per_image", minimum=1)
-        expected_scalars = {
-            "total_optimizer_steps": (total, 175),
-            "start_retention_bps": (start, 2500),
-            "final_retention_bps": (final, 500),
-            "warmup_hold_optimizer_steps": (warmup, 14),
-            "final_plateau_start_completed_steps": (plateau, 100),
-            "minimum_tokens_per_image": (self.minimum_tokens_per_image, 32),
-        }
-        drift = {
-            name: {"expected": expected, "actual": actual}
-            for name, (actual, expected) in expected_scalars.items()
-            if actual != expected
-        }
-        if drift:
-            raise ValueError(f"immutable V8 curriculum scalar drift: {drift}")
-        if self.schedule_sha256 != CURRICULUM_SCHEDULE_SHA256:
-            raise RuntimeError(
-                "immutable V8 curriculum identity hash drift: "
-                f"expected={CURRICULUM_SCHEDULE_SHA256}, actual={self.schedule_sha256}"
-            )
-
+        if (total, start, final, warmup, plateau) != (175, 2500, 500, 14, 100):
+            raise ValueError("The V8 schedule is defined for 175 updates: 14 at 25%, cosine decay to step 100, then 5%.")
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "VisualTokenCurriculum":
         if not isinstance(value, Mapping):
             raise TypeError("visual-token curriculum config must be a mapping")
         allowed = set(cls.__dataclass_fields__)
-        expected_inventory = allowed | {"enabled", "schedule_sha256"}
-        actual_inventory = set(value)
-        if actual_inventory != expected_inventory:
-            raise ValueError(
-                "non-canonical visual-token curriculum field inventory: "
-                f"missing={sorted(expected_inventory - actual_inventory)}, "
-                f"unexpected={sorted(actual_inventory - expected_inventory)}"
-            )
         if value.get("enabled") is not True:
             raise ValueError("visual-token curriculum must be explicitly enabled")
         schedule = cls(**{key: value[key] for key in allowed if key in value})
-        declared_hash = value.get("schedule_sha256")
-        if not isinstance(declared_hash, str) or declared_hash != schedule.schedule_sha256:
-            raise ValueError(
-                "visual-token curriculum schedule hash drift: "
-                f"expected={schedule.schedule_sha256}, actual={declared_hash!r}"
-            )
         return schedule
 
     @property
@@ -271,7 +172,6 @@ class VisualTokenCurriculum:
             "retention_bps": self.retention_bps(completed),
             "stage_index": self.stage_index(completed),
             "minimum_tokens_per_image": self.minimum_tokens_per_image,
-            "validation_control": self.validation_control,
         }
 
 

@@ -34,7 +34,7 @@ python src/evaluation/run.py \
   --output-dir results/lt-opd --gpus 0,1,2,3
 ```
 
-Select a subset with `--datasets mmmu textvqa`. `--workers-per-gpu 2` increases concurrency when memory permits. Batch sizes remain 1 for the five visual/MCQ tasks and 4 for GQA, POPE, TextVQA, and MME. Existing matching predictions are resumed.
+Select a subset with `--datasets mmmu textvqa`. `--workers-per-gpu 2` increases concurrency when memory permits. Batch sizes remain 1 for the five visual/MCQ tasks and 4 for GQA, POPE, TextVQA, and MME. Existing predictions are resumed; use a separate output directory for each model.
 
 ## Scoring
 
@@ -45,4 +45,4 @@ python src/evaluation/score.py --dataset mmmu \
   --output results/lt-opd/mmmu-score.json
 ```
 
-Scoring runs on CPU after inference and requires a complete split. `sources.json` records upstream commits, SHA-256 checksums, and license locations. The downloader obtains original author / harness files; the wrapper executes their unchanged scoring functions. Those files and benchmark data retain their upstream terms.
+Scoring runs on CPU after inference and requires a complete split. `sources.json` records upstream commits and license locations. The downloader obtains original author / harness files; the wrapper executes their unchanged scoring functions. Those files and benchmark data retain their upstream terms.

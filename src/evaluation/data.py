@@ -1,6 +1,6 @@
 """Dataset prompts and images used by LT-OPD evaluation."""
 from __future__ import annotations
-import ast, base64, hashlib, io, json, math, re
+import ast, base64, io, json, math, re
 from pathlib import Path
 from typing import Any, Iterable
 import pyarrow.parquet as pq
@@ -12,12 +12,6 @@ LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 def resolve_runtime_path(value):
     return Path(value).expanduser().resolve(strict=True)
 
-def sha256_file(path: Path, block_size: int = 8 * 1024 * 1024) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(block_size), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def valid_option(value: Any) -> bool:
@@ -50,13 +44,6 @@ def image_from_value(value: Any) -> Image.Image:
     raise TypeError(f"unsupported image value: {type(value)}")
 
 
-def image_pixel_sha256(image: Image.Image) -> str:
-    rgb = image.convert("RGB")
-    digest = hashlib.sha256()
-    digest.update(rgb.width.to_bytes(8, "big"))
-    digest.update(rgb.height.to_bytes(8, "big"))
-    digest.update(rgb.tobytes())
-    return digest.hexdigest()
 
 
 def iter_parquet_rows(source: Path, batch_size: int = 32) -> Iterable[dict[str, Any]]:
@@ -174,7 +161,7 @@ def rows_for(
                 "image": image_from_value(row["image"]), "prompt": _vstar_prompt(row["text"]),
                 "gold": str(row["label"]), "category": str(row["category"]),
             }
-        elif dataset in {"hrbench4k", "hrbench8k"}:
+        elif dataset == "hrbench4k":
             options = {letter: str(row[letter]) for letter in LETTERS if valid_option(row.get(letter))}
             prompt = row["question"].strip() + "\n" + "".join(
                 f"{letter}. {value}\n" for letter, value in options.items()
@@ -228,53 +215,15 @@ def rows_for(
             raise ValueError(dataset)
 
 
-def row_messages(
-    row: dict[str, Any],
-    image_audit_cache: dict[tuple[str, str], dict[str, Any]] | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    # MMMU includes a small number of official text-only questions.  Preserve
-    # their empty visual list exactly; every other loader supplies `image`.
+def row_messages(row: dict[str, Any]):
     images = row["images"] if "images" in row else [row["image"]]
-    content: list[dict[str, Any]] = []
-    image_audit: list[dict[str, Any]] = []
-    for image_value in images:
-        cache_key = None
-        if isinstance(image_value, Path):
-            resolved = image_value.resolve()
-            cache_key = ("path", str(resolved))
-            content.append({"type": "image", "image": str(resolved)})
-        else:
-            # GQA reuses 398 images for 12,578 questions.  The stable image ID
-            # is a safe cache key and avoids hashing identical pixels 30x.
-            if len(images) == 1 and row.get("image_id") is not None:
-                cache_key = ("image_id", str(row["image_id"]))
-            rgb = image_from_value(image_value)
-            content.append({"type": "image", "image": rgb})
-        audit = image_audit_cache.get(cache_key) if image_audit_cache is not None and cache_key is not None else None
-        if audit is None:
-            if isinstance(image_value, Path):
-                with Image.open(image_value) as loaded:
-                    rgb = loaded.convert("RGB")
-                    audit = {
-                        "path": str(image_value.resolve()), "file_sha256": sha256_file(image_value),
-                        "pixel_sha256": image_pixel_sha256(rgb), "width": rgb.width, "height": rgb.height,
-                    }
-            else:
-                audit = {
-                    "path": None, "file_sha256": None, "pixel_sha256": image_pixel_sha256(rgb),
-                    "width": rgb.width, "height": rgb.height,
-                }
-            if image_audit_cache is not None and cache_key is not None:
-                image_audit_cache[cache_key] = dict(audit)
-        image_audit.append(dict(audit))
+    content = [{"type": "image", "image": str(value.resolve()) if isinstance(value, Path)
+                else image_from_value(value)} for value in images]
     content.append({"type": "text", "text": row["prompt"]})
     return [
-        {
-            "role": "system",
-            "content": [{"type": "text", "text": OFFICIAL_SYSTEM_PROMPT}],
-        },
+        {"role": "system", "content": [{"type": "text", "text": OFFICIAL_SYSTEM_PROMPT}]},
         {"role": "user", "content": content},
-    ], image_audit
+    ], len(images)
 
 
 def public_row(row: dict[str, Any]) -> dict[str, Any]:

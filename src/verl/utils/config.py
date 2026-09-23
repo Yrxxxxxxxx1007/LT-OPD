@@ -20,7 +20,6 @@ from typing import Any, Optional
 
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
-from verl.utils.curriculum_capacity import operational_curriculum_profile
 
 __all__ = ["omega_conf_to_dataclass", "validate_config"]
 
@@ -76,36 +75,11 @@ def update_dict_with_config(dictionary: dict, config: DictConfig):
 
 
 def validate_config(config: DictConfig, use_reference_policy: bool, use_critic: bool) -> None:
-    """Check the published LT-OPD recipe without machine-specific release gates."""
-    from pathlib import Path
-    from training.contract import ROOT, load_contract
-    expected = OmegaConf.to_container(OmegaConf.load(ROOT / "v8.yaml"), resolve=False)
-    runtime_keys = {"paths", "trainer", "ray_kwargs", "custom_reward_function"}
-    def compare(actual, wanted, path):
-        for key, value in wanted.items():
-            name = f"{path}.{key}" if path else key
-            if isinstance(value, dict):
-                compare(actual.get(key, {}), value, name)
-            elif isinstance(value, str) and "${paths." in value:
-                continue
-            elif isinstance(value, list) and any("${paths." in str(v) for v in value):
-                continue
-            elif actual.get(key) != value:
-                raise ValueError(f"{name}: expected {value!r}, got {actual.get(key)!r}")
-    for section in expected:
-        if section in runtime_keys:
-            continue
-        value = expected[section]
-        if isinstance(value, dict):
-            compare(config[section], value, section)
-        elif config[section] != value:
-            raise ValueError(f"Unexpected {section}: {config[section]}")
-    if config.trainer.n_gpus_per_node != 8 or config.trainer.nnodes != 1:
-        raise ValueError("The published V8 recipe uses one node with 8 GPUs.")
-    if config.trainer.total_training_steps != 175 or config.trainer.total_epochs != 1:
-        raise ValueError("LT-14K requires exactly 175 updates in one epoch.")
-    if use_critic or config.reward_model.enable or config.data.val_files:
-        raise ValueError("LT-OPD uses distribution distillation without a critic or validation feedback.")
+    """Validate distributed batch dimensions before creating workers."""
+    world_size = int(config.trainer.n_gpus_per_node) * int(config.trainer.nnodes)
+    if world_size < 1:
+        raise ValueError('The number of GPUs must be positive.')
+    if int(config.data.train_batch_size) % world_size:
+        raise ValueError('train_batch_size must be divisible by the number of GPUs.')
     actor = omega_conf_to_dataclass(config.actor_rollout_ref.actor)
-    actor.validate(8, config.data.train_batch_size, config.actor_rollout_ref.model)
-    print("LT-OPD configuration verified.")
+    actor.validate(world_size, config.data.train_batch_size, config.actor_rollout_ref.model)

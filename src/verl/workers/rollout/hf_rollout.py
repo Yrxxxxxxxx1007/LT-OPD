@@ -60,14 +60,7 @@ from verl.models.transformers.vision_token_compressor import (
 )
 from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.model import extract_multi_modal_inputs
-from verl.utils.route_query import (
-    ROUTE_QUERY_POLICY,
-    SUPPORTED_ROUTE_QUERY_SCHEMAS,
-    RouteQuerySpec,
-    parse_route_query_text,
-    parse_route_query_value,
-    user_text_for_prompt_fallback,
-)
+from verl.utils.route_query import RouteQuerySpec, parse_route_query_text, parse_route_query_value, user_text_for_prompt_fallback
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.semantic_stop import (
     STOP_REASON_ANSWER_TAG,
@@ -449,52 +442,6 @@ class HFRollout(BaseRollout):
                 device=positions.device,
             )
             output.batch["position_ids"] = torch.cat([position_pad, positions], dim=-1)
-            # Conditional-route query provenance is expressed in public
-            # prompt coordinates.  Global chunk/rank padding changes those
-            # coordinates even though it does not change the selected query
-            # tokens.  Rebase every attached audit atomically with the tensor
-            # padding; otherwise a route from another same-shaped sample can
-            # pass replay while its semantic-query evidence points elsewhere.
-            route_samples = (output.non_tensor_batch or {}).get("dart_merge_routes")
-            if route_samples is not None:
-                if len(route_samples) != output_batch_size:
-                    raise RuntimeError("DART route metadata lost batch alignment during global padding")
-                for sample_idx, sample_routes in enumerate(route_samples):
-                    if isinstance(sample_routes, np.ndarray):
-                        sample_routes = sample_routes.tolist()
-                    if not isinstance(sample_routes, (list, tuple)) or not sample_routes:
-                        raise RuntimeError("DART route metadata is empty during global padding")
-                    for route in sample_routes:
-                        if not isinstance(route, Mapping):
-                            raise RuntimeError("Conditional route payload must remain a mapping")
-                        audit = route.get("query_audit")
-                        if not isinstance(audit, Mapping):
-                            raise RuntimeError("Conditional route lost query_audit during global padding")
-                        previous_width = audit.get("prefill_prompt_length")
-                        previous_left_pad = audit.get("prefill_left_padding")
-                        if (
-                            isinstance(previous_width, bool)
-                            or not isinstance(previous_width, (int, np.integer))
-                            or int(previous_width) != prompt_length
-                            or isinstance(previous_left_pad, bool)
-                            or not isinstance(previous_left_pad, (int, np.integer))
-                            or int(previous_left_pad) < 0
-                        ):
-                            raise RuntimeError("Conditional query audit has stale pre-padding geometry")
-                        old_positions = audit.get("selected_token_indices")
-                        if not isinstance(old_positions, (list, tuple)) or not old_positions:
-                            raise RuntimeError("Conditional query audit has no selected token positions")
-                        new_positions = [pad_length + int(value) for value in old_positions]
-                        expected_ids = [int(value) for value in audit.get("selected_token_ids", [])]
-                        actual_ids = [
-                            int(output.batch["prompts"][sample_idx, position].item())
-                            for position in new_positions
-                        ]
-                        if actual_ids != expected_ids:
-                            raise RuntimeError("Global left padding changed route-query token identity")
-                        audit["selected_token_indices"] = new_positions
-                        audit["prefill_left_padding"] = int(previous_left_pad) + pad_length
-                        audit["prefill_prompt_length"] = target_prompt_length
         return outputs
 
     def _get_module_device(self):
@@ -637,31 +584,6 @@ class HFRollout(BaseRollout):
             offset += count
         return route_array
 
-    @staticmethod
-    def _attach_query_audits_to_routes(routes_by_sample: np.ndarray, query_audits: list[dict]) -> np.ndarray:
-        """Bind each replayable image route to the query that created it.
-
-        ``DARTMergeRoute.from_dict`` intentionally ignores additional audit
-        keys, so actor replay consumes exactly the serialized indices while the
-        semantic query provenance remains attached for inspection.
-        """
-
-        if len(routes_by_sample) != len(query_audits):
-            raise RuntimeError(
-                "DART route/query-audit batch mismatch: "
-                f"routes={len(routes_by_sample)}, audits={len(query_audits)}"
-            )
-        for sample_idx, audit in enumerate(query_audits):
-            if not isinstance(audit, Mapping):
-                raise RuntimeError(f"Missing route-query audit for sample {sample_idx}")
-            sample_routes = routes_by_sample[sample_idx]
-            if not isinstance(sample_routes, list) or not sample_routes:
-                raise RuntimeError(f"Missing serialized DART route for sample {sample_idx}")
-            for route in sample_routes:
-                if not isinstance(route, dict):
-                    raise RuntimeError("Serialized DART routes must be dictionaries before actor replay")
-                route["query_audit"] = copy.deepcopy(dict(audit))
-        return routes_by_sample
 
     @staticmethod
     def _warp_dart_sampling_logits(
@@ -1618,19 +1540,7 @@ class HFRollout(BaseRollout):
         if special_tensor.numel() and torch.any(mask & torch.isin(sample_input_ids, special_tensor)).item():
             raise RuntimeError("Internal error: semantic query mask includes tokenizer special IDs")
 
-        audit = {
-            "schema_version": route_query_spec.schema_version,
-            "query_policy": ROUTE_QUERY_POLICY,
-            "source": query_source,
-            "canonical_text": route_query_spec.canonical_text,
-            "canonical_sha256": route_query_spec.sha256,
-            "segments": list(route_query_spec.segments),
-            "semantic_character_spans": semantic_character_spans,
-            "selected_token_count": len(selected_positions),
-            "selected_token_indices": selected_positions,
-            "selected_token_ids": [sample_ids[position] for position in selected_positions],
-        }
-        return mask, audit
+        return mask
 
     def _build_prompt_tensors_from_non_tensor_prompt(
         self,
@@ -1653,7 +1563,6 @@ class HFRollout(BaseRollout):
             attention_mask
             position_ids
             compression_query_mask
-            compression_query_audits
         """
 
         prompt_key = self._get_prompt_key_from_non_tensor_batch(prompts)
@@ -1678,7 +1587,6 @@ class HFRollout(BaseRollout):
         attention_mask_list = []
         position_ids_list = []
         compression_query_mask_list = []
-        compression_query_audit_list = []
         multi_modal_inputs_list = []
         # ``DataProto.repeat(..., interleave=True)`` keeps the same Python
         # prompt object for the n trajectories belonging to one rollout uid.
@@ -1792,21 +1700,15 @@ class HFRollout(BaseRollout):
                     batch_size=raw_prompt_count,
                     normalized_prompt=normalized_prompt,
                 )
-                sample_query_mask, sample_query_audit = self._build_user_query_mask(
+                sample_query_mask = self._build_user_query_mask(
                     sample_input_ids=sample_input_ids,
                     normalized_prompt=normalized_prompt,
                     rendered_text=text,
                     route_query_spec=route_query_spec,
                     query_source=query_source,
                 )
-                if self._uses_cdpruner():
-                    sample_uid = str(rollout_uids[sample_idx])
-                    if not sample_uid:
-                        raise RuntimeError("V8 CDPruner rollout UID must be non-empty")
-                    sample_query_audit["sample_uid"] = sample_uid
             else:
                 sample_query_mask = torch.zeros_like(sample_attention_mask, dtype=torch.bool)
-                sample_query_audit = None
 
             multi_modal_inputs = {
                 key: value
@@ -1860,7 +1762,6 @@ class HFRollout(BaseRollout):
             attention_mask_list.append(sample_attention_mask.squeeze(0))
             position_ids_list.append(sample_position_ids.squeeze(0))
             compression_query_mask_list.append(sample_query_mask.squeeze(0))
-            compression_query_audit_list.append(sample_query_audit)
             multi_modal_inputs_list.append(multi_modal_inputs or None)
 
         # max_prompt_length is a hard safety bound, not a padding target.  The
@@ -1896,96 +1797,15 @@ class HFRollout(BaseRollout):
             attention_mask[sample_idx, start:] = mask
             position_ids[sample_idx, ..., start:] = positions
             compression_query_mask[sample_idx, start:] = query_mask
-            query_audit = compression_query_audit_list[sample_idx]
-            if query_audit is not None:
-                query_audit = copy.deepcopy(query_audit)
-                query_audit["selected_token_indices"] = [
-                    start + int(position) for position in query_audit["selected_token_indices"]
-                ]
-                query_audit["prefill_left_padding"] = start
-                query_audit["prefill_prompt_length"] = target_length
-                audited_ids = [
-                    int(input_ids[sample_idx, position].item())
-                    for position in query_audit["selected_token_indices"]
-                ]
-                if audited_ids != [int(value) for value in query_audit["selected_token_ids"]]:
-                    raise RuntimeError("Left padding changed route-query token identity")
-                compression_query_audit_list[sample_idx] = query_audit
-
         prompts.non_tensor_batch["multi_modal_inputs"] = np.array(multi_modal_inputs_list, dtype=object)
-
         device = self._get_module_device()
-
         input_ids = input_ids.to(device)
         attention_mask = attention_mask.to(device)
         position_ids = position_ids.to(device)
         compression_query_mask = compression_query_mask.to(device)
 
-        return input_ids, attention_mask, position_ids, compression_query_mask, compression_query_audit_list
+        return input_ids, attention_mask, position_ids, compression_query_mask
 
-    def _validated_pretokenized_query_audits(
-        self,
-        *,
-        prompts: DataProto,
-        input_ids: torch.Tensor,
-        compression_query_mask: torch.Tensor,
-    ) -> list[dict]:
-        """Validate producer-supplied audits for legacy pre-tokenized prompts.
-
-        A bare mask is not enough to prove that boilerplate was excluded.  Old
-        pre-tokenized callers remain supported only when they provide the exact
-        semantic text, hash, token indices, and token IDs used to build it.
-        """
-
-        batch_size = int(input_ids.shape[0])
-        audits: list[dict] = []
-        image_token_id = self._resolve_image_token_id()
-        special_ids = {int(value) for value in (getattr(self.tokenizer, "all_special_ids", []) or [])}
-        for sample_idx in range(batch_size):
-            raw_audit = self._sample_non_tensor_value(
-                prompts,
-                "compression_query_audit",
-                sample_idx,
-                batch_size,
-            )
-            if hasattr(raw_audit, "tolist") and not isinstance(raw_audit, Mapping):
-                raw_audit = raw_audit.tolist()
-            if not isinstance(raw_audit, Mapping):
-                raise ValueError(
-                    "Pre-tokenized conditional prompts require sample-aligned "
-                    "non_tensor_batch['compression_query_audit']"
-                )
-            audit = dict(raw_audit)
-            audit_schema = audit.get("schema_version")
-            if audit_schema not in SUPPORTED_ROUTE_QUERY_SCHEMAS:
-                raise ValueError("Pre-tokenized query audit has an unsupported schema_version")
-            if audit.get("query_policy") != ROUTE_QUERY_POLICY:
-                raise ValueError("Pre-tokenized query audit has an unsupported query_policy")
-            spec = parse_route_query_value(
-                {
-                    "schema_version": audit_schema,
-                    "policy": ROUTE_QUERY_POLICY,
-                    "segments": audit.get("segments"),
-                    "canonical_text": audit.get("canonical_text"),
-                    "sha256": audit.get("canonical_sha256"),
-                }
-            )
-            positions = [int(value) for value in audit.get("selected_token_indices", [])]
-            expected_positions = torch.nonzero(
-                compression_query_mask[sample_idx].to(torch.bool), as_tuple=False
-            ).flatten().detach().cpu().tolist()
-            if positions != expected_positions:
-                raise ValueError("Pre-tokenized query audit indices do not match compression_query_mask")
-            ids = [int(input_ids[sample_idx, position].item()) for position in positions]
-            if ids != [int(value) for value in audit.get("selected_token_ids", [])]:
-                raise ValueError("Pre-tokenized query audit token IDs do not match input_ids")
-            if not positions or any(token_id == image_token_id or token_id in special_ids for token_id in ids):
-                raise ValueError("Pre-tokenized semantic query is empty or contains image/special tokens")
-            audit["canonical_text"] = spec.canonical_text
-            audit["canonical_sha256"] = spec.sha256
-            audit["selected_token_count"] = len(positions)
-            audits.append(audit)
-        return audits
 
     def _extract_prompt_tensors(self, prompts: DataProto):
         """
@@ -1994,7 +1814,6 @@ class HFRollout(BaseRollout):
             attention_mask
             position_ids
             compression_query_mask
-            compression_query_audits
             eos_token_id
             pad_token_id
         """
@@ -2015,7 +1834,6 @@ class HFRollout(BaseRollout):
             pad_token_id = eos_token_id
 
         compression_query_mask = None
-        compression_query_audits = None
 
         # Case 1: old verl / already-tokenized dataset.
         if "input_ids" in prompts.batch:
@@ -2046,7 +1864,6 @@ class HFRollout(BaseRollout):
                 attention_mask,
                 position_ids,
                 compression_query_mask,
-                compression_query_audits,
             ) = self._build_prompt_tensors_from_non_tensor_prompt(
                 prompts=prompts,
                 pad_token_id=pad_token_id,
@@ -2088,25 +1905,11 @@ class HFRollout(BaseRollout):
                     f"{tuple(compression_query_mask.shape)} vs {tuple(idx.shape)}"
                 )
 
-        compressor_enabled = bool(getattr(self.model_config, "vision_token_compressor", {}).get("enabled", False))
-        if (
-            compressor_enabled
-            and not self._uses_holitom_dpc_spatial_merge()
-            and compression_query_mask is not None
-            and compression_query_audits is None
-        ):
-            compression_query_audits = self._validated_pretokenized_query_audits(
-                prompts=prompts,
-                input_ids=idx,
-                compression_query_mask=compression_query_mask,
-            )
-
         return (
             idx,
             attention_mask,
             position_ids,
             compression_query_mask,
-            compression_query_audits,
             eos_token_id,
             pad_token_id,
         )
@@ -2158,7 +1961,6 @@ class HFRollout(BaseRollout):
             attention_mask,
             position_ids,
             compression_query_mask,
-            compression_query_audits,
             eos_token_id,
             pad_token_id,
         ) = self._extract_prompt_tensors(prompts)
@@ -2499,12 +2301,7 @@ class HFRollout(BaseRollout):
             if holitom_dpc_merge:
                 output_non_tensors[HOLITOM_DPC_MERGE_ROUTES_KEY] = routes_by_sample
             else:
-                if compression_query_audits is None:
-                    raise RuntimeError("Conditional rollout did not retain route-query audit metadata")
-                output_non_tensors["dart_merge_routes"] = self._attach_query_audits_to_routes(
-                    routes_by_sample,
-                    compression_query_audits,
-                )
+                output_non_tensors["dart_merge_routes"] = routes_by_sample
         output_meta_info = {"visual_compression_mode": visual_compression_mode}
         if visual_compression_mode == "no_image":
             output_meta_info["no_image_ablation_policy"] = NO_IMAGE_ABLATION_POLICY

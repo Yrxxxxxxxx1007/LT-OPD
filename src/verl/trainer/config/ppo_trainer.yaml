@@ -149,7 +149,6 @@ trainer:
   # Exact pre-update tensor/route audit. Legacy uses a one-step DART schema;
   # formal V6 routes the same isolation marker to its independent 1/10-step
   # HoliTom-DPC schema and never invokes the legacy producer.
-  dart_smoke_audit_dir: null
 
   # Directory for logging validation data; no dump if null
   validation_data_dir: null

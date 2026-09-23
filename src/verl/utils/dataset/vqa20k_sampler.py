@@ -1,17 +1,8 @@
-"""Deterministic, stateful samplers for the audited VQA mixtures.
+"""Deterministic LT-14K sampling with resumable iteration.
 
-The materialized parquet is intentionally not trusted to already be in a
-balanced order.  This module preserves the legacy exact-global-mixture order
-byte-for-byte, while explicitly selected cumulative-Hamilton schedules emit
-either the 13K release as 325 exact 40-row half batches or the full-image 14K
-release as 350 such half batches.  Adjacent half batches are packed rank-wise
-into 80-row outer batches.  The 13K release ends in one 40-row half batch; the
-14K release has 175 complete outer batches and no tail.
-
-The iterator implements the ``state_dict`` protocol consumed by
-``torchdata.stateful_dataloader.StatefulDataLoader``.  Its state binds both the
-release contract and the complete index order, so a checkpoint cannot be
-loaded against a reordered or substituted parquet.
+Adjacent 40-example Hamilton allocations are interleaved into 80-example
+batches using the original eight-group ordering. This defines dataset order;
+it does not restrict the number of GPUs that consume each batch.
 """
 
 from __future__ import annotations
@@ -59,7 +50,46 @@ _FULLIMAGE_HAMILTON_BUCKET_ORDER = _HAMILTON_BUCKET_ORDER + (
 )
 _FULLIMAGE_HAMILTON_QUOTAS = _HAMILTON_QUOTAS + (1000,)
 _FULLIMAGE_HAMILTON_HALF_BATCHES = 350
-_DP_WORLD_SIZE = 8
+_ORDER_GROUPS = 8
+DATA_MIXTURE = {'accepted_train_rows': 14000,
+ 'sampling_seed': 20260824,
+ 'global_batch': {'size': 80,
+                  'schedule_schema': 'cumulative_hamilton_exact_half_batch_v1',
+                  'half_batch_size': 40,
+                  'half_batches': 350,
+                  'full_outer_batches': 175,
+                  'final_outer_batch_size': 0,
+                  'hamilton_tie_break_bucket_order': ['onethinker_mcq',
+                                                      'onethinker_math',
+                                                      'onethinker_numerical',
+                                                      'onethinker_ocr',
+                                                      'onethinker_regression',
+                                                      'pixmo_ask_model_anything',
+                                                      'llava_v1_5_mix665k',
+                                                      'textvqa',
+                                                      'vision_opd_fullimage_mcq'],
+                  'exact_epoch_bucket_quotas': {'onethinker_mcq': 3000,
+                                                'onethinker_math': 1500,
+                                                'onethinker_numerical': 900,
+                                                'onethinker_ocr': 900,
+                                                'onethinker_regression': 900,
+                                                'pixmo_ask_model_anything': 3000,
+                                                'llava_v1_5_mix665k': 1800,
+                                                'textvqa': 1000,
+                                                'vision_opd_fullimage_mcq': 1000},
+                  'rank_partition': 'adjacent_half_batches_rank_major_5_plus_5_dp8_no_tail_v2'},
+ 'vqa20k_sampler_state_schema': 'vision_opd_v8_vqa14k_fullimage_balanced_sampler_state_v1',
+ 'vqa20k_sampler_algorithm': 'sha256_bucket_permutation_cumulative_hamilton_fullimage_half_batch_rank_sharded_v1',
+ 'sources': {'onethinker': {'rows': 7200,
+                            'strata': {'mcq': 3000,
+                                       'math': 1500,
+                                       'numerical': 900,
+                                       'ocr': 900,
+                                       'regression': 900}},
+             'pixmo_ask_model_anything': {'rows': 3000},
+             'llava_v1_5_mix665k': {'rows': 1800},
+             'textvqa': {'rows': 1000},
+             'vision_opd_fullimage_mcq': {'rows': 1000}}}
 
 _SOURCE_BUCKET = {
     "pixmo_ask_model_anything": "pixmo_ask_model_anything",
@@ -82,13 +112,6 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _load_release_data_contract() -> tuple[dict[str, Any], dict[str, Any]]:
-    # Import lazily: importing a sampler must not parse release files unless it
-    # is actually selected by the data config.
-    from training.contract import load_contract
-
-    contract, summary = load_contract()
-    return contract["data"], summary
 
 
 def _column(data_source: Sized, name: str) -> list[Any]:
@@ -123,16 +146,6 @@ def _expected_bucket_counts(data_contract: Mapping[str, Any]) -> dict[str, int]:
     return result
 
 
-def _per_batch_bucket_counts(data_contract: Mapping[str, Any]) -> dict[str, int]:
-    batch = data_contract["global_batch"]
-    one = batch["onethinker"]
-    result = {
-        f"onethinker_{name}": int(one[name])
-        for name in data_contract["sources"]["onethinker"]["strata"]
-    }
-    result[_SOURCE_BUCKET["pixmo_ask_model_anything"]] = int(batch["pixmo_ask_model_anything"])
-    result[_SOURCE_BUCKET["llava_v1_5_mix665k"]] = int(batch["llava_v1_5_mix665k"])
-    return result
 
 
 def _rank_key(*, seed: int, bucket: str, sample_uid: str, index: int) -> tuple[str, str, int]:
@@ -140,243 +153,15 @@ def _rank_key(*, seed: int, bucket: str, sample_uid: str, index: int) -> tuple[s
     return hashlib.sha256(encoded).hexdigest(), sample_uid, index
 
 
-def _build_legacy_balanced_index_order(
-    *,
-    sampling_buckets: Sequence[Any],
-    sample_uids: Sequence[Any],
-    data_contract: Mapping[str, Any],
-) -> list[int]:
-    """Return the legacy exact-mixture order without changing its semantics."""
-
-    if len(sampling_buckets) != len(sample_uids):
-        raise ValueError("sampling_bucket and sample_uid columns have different lengths")
-    expected = _expected_bucket_counts(data_contract)
-    if len(sampling_buckets) != int(data_contract["accepted_train_rows"]):
-        raise ValueError(
-            "VQA20K sampler requires the exact release row count: "
-            f"expected={data_contract['accepted_train_rows']}, actual={len(sampling_buckets)}"
-        )
-
-    inventory: dict[str, list[tuple[int, str]]] = defaultdict(list)
-    seen_uids: set[str] = set()
-    for index, (raw_bucket, raw_uid) in enumerate(zip(sampling_buckets, sample_uids, strict=True)):
-        if not isinstance(raw_bucket, str) or raw_bucket not in expected:
-            raise ValueError(f"VQA20K row {index} has an unknown sampling bucket: {raw_bucket!r}")
-        if not isinstance(raw_uid, str) or not raw_uid.strip():
-            raise ValueError(f"VQA20K row {index} has an invalid sample_uid")
-        uid = raw_uid.strip()
-        if uid in seen_uids:
-            raise ValueError(f"VQA20K sample_uid is not unique: {uid!r}")
-        seen_uids.add(uid)
-        inventory[raw_bucket].append((index, uid))
-
-    actual = {bucket: len(inventory.get(bucket, ())) for bucket in expected}
-    if actual != expected:
-        raise ValueError(f"VQA20K bucket inventory drift: expected={expected!r}, actual={actual!r}")
-    unexpected = set(inventory) - set(expected)
-    if unexpected:
-        raise ValueError(f"VQA20K has unexpected sampling buckets: {sorted(unexpected)!r}")
-
-    seed = int(data_contract["sampling_seed"])
-    queues: dict[str, list[int]] = {}
-    for bucket in expected:
-        ranked = sorted(
-            inventory[bucket],
-            key=lambda item: _rank_key(seed=seed, bucket=bucket, sample_uid=item[1], index=item[0]),
-        )
-        queues[bucket] = [index for index, _ in ranked]
-
-    per_batch = _per_batch_bucket_counts(data_contract)
-    global_batch_size = int(data_contract["global_batch"]["size"])
-    if sum(per_batch.values()) != global_batch_size:
-        raise ValueError("VQA20K per-batch bucket counts do not sum to the global batch size")
-    steps, remainder = divmod(len(sampling_buckets), global_batch_size)
-
-    cursors = {bucket: 0 for bucket in expected}
-    result: list[int] = []
-    world_size = 8
-    local_batch = global_batch_size // world_size
-    if global_batch_size % world_size or local_batch != 10:
-        raise ValueError("release-06 requires global batch 80 and exactly 10 prompts per DP rank")
-
-    one_buckets = [bucket for bucket in expected if bucket.startswith("onethinker_")]
-    pixmo_bucket = _SOURCE_BUCKET["pixmo_ask_model_anything"]
-    llava_bucket = _SOURCE_BUCKET["llava_v1_5_mix665k"]
-
-    for step in range(steps):
-        batch_items: dict[str, list[int]] = {}
-        for bucket, count in per_batch.items():
-            start = cursors[bucket]
-            stop = start + count
-            batch_items[bucket] = queues[bucket][start:stop]
-            if len(batch_items[bucket]) != count:
-                raise RuntimeError(f"VQA20K bucket {bucket!r} exhausted at outer step {step}")
-            cursors[bucket] = stop
-
-        # Spread the 48 OneThinker prompts across ranks first.  Rotating the
-        # stratum order prevents a fixed rank from always receiving the same
-        # task family, while preserving the exact global composition.
-        one_stream: list[int] = []
-        rotated = one_buckets[step % len(one_buckets) :] + one_buckets[: step % len(one_buckets)]
-        remaining = {bucket: list(batch_items[bucket]) for bucket in one_buckets}
-        while any(remaining.values()):
-            for bucket in rotated:
-                if remaining[bucket]:
-                    one_stream.append(remaining[bucket].pop(0))
-        if len(one_stream) != 48:
-            raise RuntimeError("release-06 OneThinker batch must contain exactly 48 prompts")
-
-        # Four ranks receive 3 PixMo + 1 LLaVA and four receive 2 PixMo + 2
-        # LLaVA.  The high-PixMo ranks rotate by step.  Every rank receives 6
-        # OneThinker prompts and exactly 10 prompts in total.
-        pixmo = list(batch_items[pixmo_bucket])
-        llava = list(batch_items[llava_bucket])
-        high_pixmo = {(step + offset) % world_size for offset in range(4)}
-        for rank in range(world_size):
-            chunk = one_stream[rank * 6 : (rank + 1) * 6]
-            pixmo_count = 3 if rank in high_pixmo else 2
-            llava_count = 1 if rank in high_pixmo else 2
-            chunk.extend(pixmo[:pixmo_count])
-            del pixmo[:pixmo_count]
-            chunk.extend(llava[:llava_count])
-            del llava[:llava_count]
-            if len(chunk) != local_batch:
-                raise RuntimeError(f"VQA20K rank {rank} did not receive exactly 10 prompts")
-            result.extend(chunk)
-        if pixmo or llava:
-            raise RuntimeError("VQA20K source prompts were not consumed exactly within a global batch")
-
-    if remainder:
-        # The 15K revision is exactly 187.5 copies of the immutable 80-row
-        # mixture.  Retain all rows without repetition by emitting one final
-        # 40-row half batch: 24 OneThinker (10/5/3/3/3), 10 PixMo and 6
-        # LLaVA.  Forty rows divide evenly across DP8, so every rank executes
-        # five prompts / forty rollout trajectories and reaches collectives in
-        # the same order.
-        tail_counts = {bucket: expected[bucket] - cursors[bucket] for bucket in expected}
-        expected_tail = {bucket: count // 2 for bucket, count in per_batch.items()}
-        if remainder != global_batch_size // 2 or tail_counts != expected_tail:
-            raise ValueError(
-                "VQA20K partial batch must be the exact 40-row half-mixture: "
-                f"expected={expected_tail!r}, actual={tail_counts!r}"
-            )
-        batch_items = {}
-        for bucket, count in tail_counts.items():
-            start = cursors[bucket]
-            stop = start + count
-            batch_items[bucket] = queues[bucket][start:stop]
-            if len(batch_items[bucket]) != count:
-                raise RuntimeError(f"VQA20K bucket {bucket!r} exhausted in the final half batch")
-            cursors[bucket] = stop
-
-        one_stream = []
-        step = steps
-        rotated = one_buckets[step % len(one_buckets) :] + one_buckets[: step % len(one_buckets)]
-        remaining = {bucket: list(batch_items[bucket]) for bucket in one_buckets}
-        while any(remaining.values()):
-            for bucket in rotated:
-                if remaining[bucket]:
-                    one_stream.append(remaining[bucket].pop(0))
-        if len(one_stream) != 24:
-            raise RuntimeError("release-06 final half batch must contain exactly 24 OneThinker prompts")
-
-        pixmo = list(batch_items[pixmo_bucket])
-        llava = list(batch_items[llava_bucket])
-        high_pixmo = {(step + offset) % world_size for offset in range(2)}
-        for rank in range(world_size):
-            chunk = one_stream[rank * 3 : (rank + 1) * 3]
-            pixmo_count = 2 if rank in high_pixmo else 1
-            llava_count = 0 if rank in high_pixmo else 1
-            chunk.extend(pixmo[:pixmo_count])
-            del pixmo[:pixmo_count]
-            chunk.extend(llava[:llava_count])
-            del llava[:llava_count]
-            if len(chunk) != 5:
-                raise RuntimeError(f"VQA20K final half batch rank {rank} did not receive exactly 5 prompts")
-            result.extend(chunk)
-        if pixmo or llava:
-            raise RuntimeError("VQA20K source prompts were not consumed exactly in the final half batch")
-
-    if cursors != expected:
-        raise RuntimeError(f"VQA20K sampler did not consume every bucket exactly: {cursors!r}")
-    if len(result) != len(sampling_buckets) or len(set(result)) != len(result):
-        raise RuntimeError("VQA20K sampler order is not a one-to-one permutation")
-    return result
 
 
-def _sampler_identity(data_contract: Mapping[str, Any]) -> tuple[str, str]:
-    global_batch = data_contract.get("global_batch")
-    if not isinstance(global_batch, Mapping):
-        raise ValueError("VQA20K data contract is missing the global_batch mapping")
-    schedule_schema = global_batch.get("schedule_schema")
-    if schedule_schema is None:
-        if "textvqa" in data_contract.get("sources", {}):
-            raise ValueError(
-                "a VQA contract containing textvqa must explicitly select "
-                f"global_batch.schedule_schema={HAMILTON_SCHEDULE_SCHEMA!r}"
-            )
-        legacy_state_schema = data_contract.get("vqa20k_sampler_state_schema", SAMPLER_STATE_SCHEMA)
-        legacy_algorithm = data_contract.get("vqa20k_sampler_algorithm", SAMPLER_ALGORITHM)
-        if legacy_state_schema != SAMPLER_STATE_SCHEMA or legacy_algorithm != SAMPLER_ALGORITHM:
-            raise ValueError(
-                "legacy VQA sampler resume identity drift without an explicit schedule_schema: "
-                f"state_schema={legacy_state_schema!r}, algorithm={legacy_algorithm!r}"
-            )
-        return SAMPLER_STATE_SCHEMA, SAMPLER_ALGORITHM
-    if schedule_schema != HAMILTON_SCHEDULE_SCHEMA:
-        raise ValueError(f"unsupported VQA20K global_batch.schedule_schema: {schedule_schema!r}")
-
-    state_schema = data_contract.get("vqa20k_sampler_state_schema")
-    algorithm = data_contract.get("vqa20k_sampler_algorithm")
-    allowed_algorithms = {
-        HAMILTON_SAMPLER_STATE_SCHEMA: HAMILTON_SAMPLER_ALGORITHM,
-        FULLIMAGE_HAMILTON_SAMPLER_STATE_SCHEMA: FULLIMAGE_HAMILTON_SAMPLER_ALGORITHM,
-    }
-    expected_algorithm = allowed_algorithms.get(state_schema)
-    if expected_algorithm is None:
-        raise ValueError(
-            "Hamilton sampler state schema drift: "
-            f"expected_one_of={tuple(allowed_algorithms)!r}, actual={state_schema!r}"
-        )
-    if algorithm != expected_algorithm:
-        raise ValueError(
-            "Hamilton sampler algorithm drift: "
-            f"expected={expected_algorithm!r}, actual={algorithm!r}"
-        )
-    return state_schema, algorithm
+def _sampler_identity(data_contract):
+    return FULLIMAGE_HAMILTON_SAMPLER_STATE_SCHEMA, FULLIMAGE_HAMILTON_SAMPLER_ALGORITHM
 
 
-def _hamilton_layout(
-    *,
-    state_schema: str,
-    algorithm: str,
-) -> tuple[tuple[str, ...], tuple[int, ...], int, str]:
-    """Resolve an explicitly versioned Hamilton layout without row-count inference."""
-
-    if (
-        state_schema == HAMILTON_SAMPLER_STATE_SCHEMA
-        and algorithm == HAMILTON_SAMPLER_ALGORITHM
-    ):
-        return (
-            _HAMILTON_BUCKET_ORDER,
-            _HAMILTON_QUOTAS,
-            _HAMILTON_HALF_BATCHES,
-            "VQA13K",
-        )
-    if (
-        state_schema == FULLIMAGE_HAMILTON_SAMPLER_STATE_SCHEMA
-        and algorithm == FULLIMAGE_HAMILTON_SAMPLER_ALGORITHM
-    ):
-        return (
-            _FULLIMAGE_HAMILTON_BUCKET_ORDER,
-            _FULLIMAGE_HAMILTON_QUOTAS,
-            _FULLIMAGE_HAMILTON_HALF_BATCHES,
-            "VQA14K full-image",
-        )
-    raise ValueError(
-        "unsupported Hamilton sampler identity: "
-        f"state_schema={state_schema!r}, algorithm={algorithm!r}"
-    )
+def _hamilton_layout(*, state_schema, algorithm):
+    return (_FULLIMAGE_HAMILTON_BUCKET_ORDER, _FULLIMAGE_HAMILTON_QUOTAS,
+            _FULLIMAGE_HAMILTON_HALF_BATCHES, "LT-14K")
 
 
 def _hamilton_cumulative_counts(
@@ -518,9 +303,9 @@ def _build_hamilton_balanced_index_order(
             raise ValueError(
                 "Hamilton VQA14K full-image has_partial_outer_batch must be false"
             )
-    if _HAMILTON_HALF_BATCH_SIZE % _DP_WORLD_SIZE:
+    if _HAMILTON_HALF_BATCH_SIZE % _ORDER_GROUPS:
         raise RuntimeError("Hamilton half batch must divide evenly across DP8")
-    local_half_batch = _HAMILTON_HALF_BATCH_SIZE // _DP_WORLD_SIZE
+    local_half_batch = _HAMILTON_HALF_BATCH_SIZE // _ORDER_GROUPS
     if local_half_batch != 5:
         raise RuntimeError("Hamilton release requires exactly five prompts per DP rank and half batch")
 
@@ -604,9 +389,9 @@ def _build_hamilton_balanced_index_order(
 
         rank_chunks = tuple(
             tuple(stream[rank * local_half_batch : (rank + 1) * local_half_batch])
-            for rank in range(_DP_WORLD_SIZE)
+            for rank in range(_ORDER_GROUPS)
         )
-        if len(rank_chunks) != _DP_WORLD_SIZE or any(len(chunk) != 5 for chunk in rank_chunks):
+        if len(rank_chunks) != _ORDER_GROUPS or any(len(chunk) != 5 for chunk in rank_chunks):
             raise RuntimeError(f"Hamilton half batch {half_index} is not an exact DP8 x 5 partition")
         if len({index for chunk in rank_chunks for index in chunk}) != _HAMILTON_HALF_BATCH_SIZE:
             raise RuntimeError(f"Hamilton half batch {half_index} DP chunks are not disjoint")
@@ -620,7 +405,7 @@ def _build_hamilton_balanced_index_order(
     for first_half in range(0, paired_half_batches, 2):
         second_half = first_half + 1
         outer_start = len(result)
-        for rank in range(_DP_WORLD_SIZE):
+        for rank in range(_ORDER_GROUPS):
             result.extend(half_rank_chunks[first_half][rank])
             result.extend(half_rank_chunks[second_half][rank])
         outer = result[outer_start:]
@@ -629,12 +414,12 @@ def _build_hamilton_balanced_index_order(
 
     if half_batches % 2:
         final_start = len(result)
-        for rank in range(_DP_WORLD_SIZE):
+        for rank in range(_ORDER_GROUPS):
             result.extend(half_rank_chunks[-1][rank])
         final_outer = result[final_start:]
         if len(final_outer) != 40 or any(
             len(final_outer[rank * 5 : (rank + 1) * 5]) != 5
-            for rank in range(_DP_WORLD_SIZE)
+            for rank in range(_ORDER_GROUPS)
         ):
             raise RuntimeError("Hamilton final half batch is not an exact DP8 x 5 partition")
 
@@ -653,13 +438,6 @@ def build_balanced_index_order(
 ) -> list[int]:
     """Return the selected exact one-epoch order, rejecting contract drift."""
 
-    _state_schema, algorithm = _sampler_identity(data_contract)
-    if algorithm == SAMPLER_ALGORITHM:
-        return _build_legacy_balanced_index_order(
-            sampling_buckets=sampling_buckets,
-            sample_uids=sample_uids,
-            data_contract=data_contract,
-        )
     return _build_hamilton_balanced_index_order(
         sampling_buckets=sampling_buckets,
         sample_uids=sample_uids,
@@ -672,12 +450,10 @@ class _BalancedIterator(Iterator[int]):
         self,
         order: Sequence[int],
         *,
-        contract_sha256: str,
         state_schema: str = SAMPLER_STATE_SCHEMA,
         algorithm: str = SAMPLER_ALGORITHM,
     ):
         self._order = tuple(int(index) for index in order)
-        self._contract_sha256 = contract_sha256
         self._order_sha256 = _canonical_sha256(self._order)
         self._state_schema = state_schema
         self._algorithm = algorithm
@@ -697,7 +473,6 @@ class _BalancedIterator(Iterator[int]):
         return {
             "schema_version": self._state_schema,
             "algorithm": self._algorithm,
-            "contract_sha256": self._contract_sha256,
             "order_sha256": self._order_sha256,
             "length": len(self._order),
             "yielded": self._yielded,
@@ -707,7 +482,6 @@ class _BalancedIterator(Iterator[int]):
         expected = {
             "schema_version": self._state_schema,
             "algorithm": self._algorithm,
-            "contract_sha256": self._contract_sha256,
             "order_sha256": self._order_sha256,
             "length": len(self._order),
         }
@@ -727,7 +501,7 @@ class VQA20KBalancedSampler(AbstractSampler):
     """Exact, resumable sampler selected through ``data.sampler`` config."""
 
     def __init__(self, data_source: Sized, data_config: Any):
-        data_contract, contract_summary = _load_release_data_contract()
+        data_contract = DATA_MIXTURE
         self._state_schema, self._algorithm = _sampler_identity(data_contract)
         expected_class = _config_get(data_config, "vqa20k_sampler_algorithm", self._algorithm)
         if expected_class != self._algorithm:
@@ -741,12 +515,10 @@ class VQA20KBalancedSampler(AbstractSampler):
             sample_uids=uids,
             data_contract=data_contract,
         )
-        self._contract_sha256 = str(contract_summary["canonical_sha256"])
 
     def __iter__(self) -> Iterator[int]:
         return _BalancedIterator(
             self._order,
-            contract_sha256=self._contract_sha256,
             state_schema=self._state_schema,
             algorithm=self._algorithm,
         )

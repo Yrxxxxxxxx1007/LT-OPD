@@ -344,12 +344,6 @@ class RolloutConfig(BaseConfig):
                 raise ValueError("semantic_stop_transport_prefix is valid only with virtual-open mode")
             if self.ignore_eos:
                 raise ValueError("semantic stop requires the ordinary EOS fallback to remain enabled")
-        if self.name == "vllm" and self.dart_merge_aware:
-            from verl.workers.rollout.vllm_dpc_contract import (
-                validate_vllm_rollout_admission_fields,
-            )
-
-            validate_vllm_rollout_admission_fields(self.__dict__)
         # Deprecation warning for mode field - only async mode is supported
         if self.mode == "sync":
             raise ValueError(

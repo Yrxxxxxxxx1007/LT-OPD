@@ -162,7 +162,6 @@ vision_token_compressor:
 
   residual_epsilon: null
 
-  assignment_chunk_tokens: null
 
   selector_dtype: null
 

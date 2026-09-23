@@ -127,7 +127,7 @@ class FSDPShardMerger:
             model_state_dict_lst[rank] = state_dict
             return state_dict
 
-        with ThreadPoolExecutor(max_workers=min(32, os.cpu_count())) as executor:
+        with ThreadPoolExecutor(max_workers=min(32, os.cpu_count() or 1)) as executor:
             futures = [executor.submit(process_one_shard, rank, model_state_dict_lst) for rank in range(total_shards)]
             for future in tqdm(futures, desc=f"Loading {total_shards} FSDP shards", total=total_shards):
                 future.result()
@@ -141,10 +141,7 @@ class FSDPShardMerger:
             for model_state_shard in model_state_dict_lst:
                 # add tensor shard in order of rank to state_dict[key]
                 tensor = model_state_shard.pop(key)
-                # Exp3 trains Qwen3.5's native visual merger with FP32 master
-                # weights and audits the exported projector bit-for-bit against
-                # its checkpoint sidecar.  Do not silently quantize that trained
-                # state while keeping the frozen base weights in BF16.
+                # Preserve the native visual merger's FP32 training weights.
                 export_dtype = (
                     torch.float32
                     if "lora_" in key or "visual.merger." in key

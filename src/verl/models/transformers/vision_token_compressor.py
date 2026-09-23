@@ -104,11 +104,9 @@ def build_qwen3_5_position_ids(
 
 @dataclass(frozen=True)
 class DARTMergeRoute:
-    """A complete, replayable mapping from source tokens to output anchors."""
+    """Selected visual token indices and positions for replay."""
 
     selected_indices: torch.Tensor
-    assignment: torch.Tensor
-    source_counts: torch.Tensor
     original_tokens: int
     output_tokens: int
     anchor_coordinates: Optional[torch.Tensor] = None
@@ -133,10 +131,6 @@ class DARTMergeRoute:
             raise ValueError("DART output token count cannot exceed its source count")
         if self.selected_indices.shape != (self.output_tokens,):
             raise ValueError("selected_indices has an invalid shape")
-        if self.assignment.shape != (self.original_tokens,):
-            raise ValueError("assignment has an invalid shape")
-        if self.source_counts.shape != (self.output_tokens,):
-            raise ValueError("source_counts has an invalid shape")
         if self.anchor_coordinates is not None and self.anchor_coordinates.shape != (self.output_tokens, 3):
             raise ValueError("anchor_coordinates must be [output_tokens, 3]")
         identity = (self.schema_version, self.algorithm, self.method)
@@ -172,11 +166,7 @@ class DARTMergeRoute:
                 raise ValueError("curriculum route schedule hash must be lowercase SHA-256")
         elif any(value is not None for value in curriculum_identity):
             raise ValueError("curriculum metadata is valid only for the curriculum route schema")
-        if (
-            self.selected_indices.dtype != torch.long
-            or self.assignment.dtype != torch.long
-            or self.source_counts.dtype != torch.long
-        ):
+        if self.selected_indices.dtype != torch.long:
             raise TypeError("DART route indices must use torch.long")
         if self.anchor_coordinates is not None:
             if self.anchor_coordinates.is_floating_point() or self.anchor_coordinates.is_complex():
@@ -189,27 +179,10 @@ class DARTMergeRoute:
             raise ValueError("DART selected_indices must be strictly increasing in original token order")
         if self.selected_indices.min().item() < 0 or self.selected_indices.max().item() >= self.original_tokens:
             raise ValueError("DART anchor index is out of range")
-        if self.assignment.min().item() < 0 or self.assignment.max().item() >= self.output_tokens:
-            raise ValueError("DART assignment is out of range")
-        if int(self.source_counts.sum().item()) != self.original_tokens:
-            raise ValueError("DART source counts do not conserve all input tokens")
-        if torch.any(self.source_counts <= 0).item():
-            raise ValueError("DART source_counts must be positive for every anchor")
-        expected = torch.bincount(self.assignment, minlength=self.output_tokens).to(self.source_counts.device)
-        if not torch.equal(expected, self.source_counts):
-            raise ValueError("DART source_counts does not match assignment")
-        anchor_assignment = self.assignment.index_select(0, self.selected_indices.to(self.assignment.device))
-        expected_anchor_assignment = torch.arange(
-            self.output_tokens, device=self.assignment.device, dtype=torch.long
-        )
-        if not torch.equal(anchor_assignment, expected_anchor_assignment):
-            raise ValueError("DART assignment must map every retained source token to its own anchor")
 
     def to(self, device: torch.device | str) -> "DARTMergeRoute":
         return DARTMergeRoute(
             selected_indices=self.selected_indices.to(device=device),
-            assignment=self.assignment.to(device=device),
-            source_counts=self.source_counts.to(device=device),
             original_tokens=self.original_tokens,
             output_tokens=self.output_tokens,
             anchor_coordinates=(
@@ -227,8 +200,6 @@ class DARTMergeRoute:
         route = self.to("cpu") if cpu else self
         payload = {
             "selected_indices": route.selected_indices,
-            "assignment": route.assignment,
-            "source_counts": route.source_counts,
             "original_tokens": route.original_tokens,
             "output_tokens": route.output_tokens,
             "anchor_coordinates": route.anchor_coordinates,
@@ -253,7 +224,7 @@ class DARTMergeRoute:
 
     @classmethod
     def from_dict(cls, payload: dict, *, device: Optional[torch.device | str] = None) -> "DARTMergeRoute":
-        required = {"selected_indices", "assignment", "source_counts", "original_tokens", "output_tokens"}
+        required = {"selected_indices", "original_tokens", "output_tokens"}
         missing = required.difference(payload)
         if missing:
             raise ValueError(f"Serialized DART route is missing keys: {sorted(missing)}")
@@ -282,8 +253,6 @@ class DARTMergeRoute:
             coordinates = coordinates.to(dtype=torch.long)
         route = cls(
             selected_indices=exact_long_tensor("selected_indices"),
-            assignment=exact_long_tensor("assignment"),
-            source_counts=exact_long_tensor("source_counts"),
             original_tokens=int(original_tokens),
             output_tokens=int(output_tokens),
             anchor_coordinates=coordinates,
@@ -582,8 +551,7 @@ def validate_cdpruner_curriculum_route(
 ) -> int:
     """Validate one V2 route against the sole active optimizer-step state.
 
-    This is the shared authority used by rollout replay, the trainer, and both
-    online/offline smoke auditors.  Keeping the integer budget and the three
+    This is shared by rollout and actor replay. Keeping the integer budget and the three
     schedule fields here prevents a stale fixed-5% assertion from silently
     diverging from the optimizer-step curriculum.
     """
@@ -980,36 +948,6 @@ def _fast_greedy_conditional_dpp(
     return torch.sort(selected).values
 
 
-def _nearest_anchor_assignment(
-    normalized_visual: torch.Tensor,
-    selected_indices: torch.Tensor,
-    *,
-    maximum_chunk_tokens: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build audit-only source provenance without a persistent ``N x K`` map."""
-
-    if maximum_chunk_tokens <= 0:
-        raise ValueError("maximum_chunk_tokens must be positive")
-    num_tokens = int(normalized_visual.shape[0])
-    output_tokens = int(selected_indices.numel())
-    anchors = normalized_visual.index_select(0, selected_indices)
-    assignment = torch.empty(num_tokens, device=normalized_visual.device, dtype=torch.long)
-
-    # Cap each transient similarity block at roughly one million FP32 values
-    # even if a caller raises the nominal token chunk size.
-    chunk_tokens = min(maximum_chunk_tokens, max(1, 1_048_576 // max(1, output_tokens)))
-    for start in range(0, num_tokens, chunk_tokens):
-        end = min(num_tokens, start + chunk_tokens)
-        similarities = normalized_visual[start:end] @ anchors.transpose(0, 1)
-        assignment[start:end] = torch.argmax(similarities, dim=-1)
-
-    # Each retained token is its own representative.  This makes every source
-    # count positive while never changing the actual output embedding.
-    assignment[selected_indices] = torch.arange(output_tokens, device=normalized_visual.device, dtype=torch.long)
-    source_counts = torch.bincount(assignment, minlength=output_tokens).to(torch.long)
-    return assignment, source_counts
-
-
 @torch.no_grad()
 def build_cdpruner_route(
     image_embeds: torch.Tensor,
@@ -1019,7 +957,6 @@ def build_cdpruner_route(
     kernel_jitter: float = 1e-6,
     relevance_epsilon: float = 1e-6,
     residual_epsilon: float = 1e-12,
-    assignment_chunk_tokens: int = 2048,
     retention_bps: int = 500,
     curriculum_completed_steps: Optional[int] = None,
     curriculum_schedule_sha256: Optional[str] = None,
@@ -1054,12 +991,6 @@ def build_cdpruner_route(
         for value in (kernel_jitter, relevance_epsilon, residual_epsilon)
     ):
         raise ValueError("CDPruner numerical epsilons must be positive")
-    if (
-        isinstance(assignment_chunk_tokens, bool)
-        or not isinstance(assignment_chunk_tokens, Integral)
-        or assignment_chunk_tokens <= 0
-    ):
-        raise ValueError("assignment_chunk_tokens must be positive")
 
     curriculum_enabled = curriculum_completed_steps is not None or curriculum_schedule_sha256 is not None
     if curriculum_enabled and (curriculum_completed_steps is None or curriculum_schedule_sha256 is None):
@@ -1075,8 +1006,6 @@ def build_cdpruner_route(
         selected_indices = torch.arange(num_tokens, device=image_embeds.device, dtype=torch.long)
         route = DARTMergeRoute(
             selected_indices=selected_indices,
-            assignment=selected_indices.clone(),
-            source_counts=torch.ones(num_tokens, device=image_embeds.device, dtype=torch.long),
             original_tokens=num_tokens,
             output_tokens=num_tokens,
             anchor_coordinates=coordinates,
@@ -1109,15 +1038,8 @@ def build_cdpruner_route(
     if selected_indices.numel() != output_tokens or torch.unique(selected_indices).numel() != output_tokens:
         raise RuntimeError("CDPruner did not produce the exact unique token budget")
 
-    assignment, source_counts = _nearest_anchor_assignment(
-        normalized_visual,
-        selected_indices,
-        maximum_chunk_tokens=assignment_chunk_tokens,
-    )
     route = DARTMergeRoute(
         selected_indices=selected_indices,
-        assignment=assignment,
-        source_counts=source_counts,
         original_tokens=num_tokens,
         output_tokens=output_tokens,
         anchor_coordinates=coordinates.index_select(0, selected_indices),
@@ -1177,8 +1099,6 @@ def build_dart_merge_route(
         indices = torch.arange(num_tokens, device=image_embeds.device, dtype=torch.long)
         route = DARTMergeRoute(
             selected_indices=indices,
-            assignment=indices.clone(),
-            source_counts=torch.ones(num_tokens, device=image_embeds.device, dtype=torch.long),
             original_tokens=num_tokens,
             output_tokens=num_tokens,
         )
@@ -1233,18 +1153,8 @@ def build_dart_merge_route(
     if selected_indices.numel() != output_tokens or torch.unique(selected_indices).numel() != output_tokens:
         raise RuntimeError("Conditional diversity selector did not produce the exact unique token budget")
 
-    # Assignment is provenance only: output embeddings are never merged.  It
-    # establishes deterministic source conservation for audits.
-    anchor_features = normalized.index_select(0, selected_indices)
-    assignment = torch.argmax(normalized @ anchor_features.transpose(0, 1), dim=-1).to(torch.long)
-    # Every selected token must remain the representative of its own cluster.
-    assignment[selected_indices] = torch.arange(output_tokens, device=image_embeds.device, dtype=torch.long)
-    source_counts = torch.bincount(assignment, minlength=output_tokens).to(torch.long)
-
     route = DARTMergeRoute(
         selected_indices=selected_indices,
-        assignment=assignment,
-        source_counts=source_counts,
         original_tokens=num_tokens,
         output_tokens=output_tokens,
     )
@@ -1371,7 +1281,6 @@ class VisionCDPrunerCompressor(nn.Module):
         kernel_jitter: float = 1e-6,
         relevance_epsilon: float = 1e-6,
         residual_epsilon: float = 1e-12,
-        assignment_chunk_tokens: int = 2048,
         curriculum: Optional[Mapping[str, Any]] = None,
     ) -> None:
         super().__init__()
@@ -1384,12 +1293,6 @@ class VisionCDPrunerCompressor(nn.Module):
             for value in (kernel_jitter, relevance_epsilon, residual_epsilon)
         ):
             raise ValueError("CDPruner numerical epsilons must be positive")
-        if (
-            isinstance(assignment_chunk_tokens, bool)
-            or not isinstance(assignment_chunk_tokens, Integral)
-            or assignment_chunk_tokens <= 0
-        ):
-            raise ValueError("assignment_chunk_tokens must be positive")
         self.curriculum = None
         self.curriculum_completed_steps: Optional[int] = None
         self.curriculum_schedule_sha256: Optional[str] = None
@@ -1412,7 +1315,6 @@ class VisionCDPrunerCompressor(nn.Module):
         self.kernel_jitter = float(kernel_jitter)
         self.relevance_epsilon = float(relevance_epsilon)
         self.residual_epsilon = float(residual_epsilon)
-        self.assignment_chunk_tokens = int(assignment_chunk_tokens)
 
     def set_curriculum_step(self, completed_optimizer_steps: int) -> dict[str, Any]:
         """Bind the compressor to one pre-update optimizer-step state."""
@@ -1426,7 +1328,7 @@ class VisionCDPrunerCompressor(nn.Module):
         return state
 
     def set_final_retention_for_evaluation(self) -> dict[str, Any]:
-        """Use the final 5% budget for standalone diagnostic inference."""
+        """Use the final 5% budget for inference."""
 
         if self.curriculum is None:
             return {
@@ -1473,7 +1375,6 @@ class VisionCDPrunerCompressor(nn.Module):
                 kernel_jitter=self.kernel_jitter,
                 relevance_epsilon=self.relevance_epsilon,
                 residual_epsilon=self.residual_epsilon,
-                assignment_chunk_tokens=self.assignment_chunk_tokens,
                 retention_bps=retention_bps,
                 curriculum_completed_steps=curriculum_completed_steps,
                 curriculum_schedule_sha256=schedule_sha256,
@@ -1549,7 +1450,7 @@ def build_vision_token_compressor(
     *,
     allow_legacy: bool = True,
 ) -> VisionHoliTomDPCSpatialMergeCompressor | VisionCDPrunerCompressor | VisionDARTMergeCompressor:
-    """Instantiate an audited compressor contract without algorithm fallback.
+    """Instantiate the configured visual token compressor.
 
     In particular, a ``qwen35_cdpruner_v1`` checkpoint can never be silently
     reconstructed with the third-release selector.  Legacy construction is
@@ -1560,11 +1461,6 @@ def build_vision_token_compressor(
     if algorithm == HOLITOM_DPC_SPATIAL_MERGE_ALGORITHM:
         exact_identifiers = {
             "method": HOLITOM_DPC_SPATIAL_MERGE_METHOD,
-            "paper_url": "https://proceedings.neurips.cc/paper_files/paper/2025/file/"
-            "c573258c38d0a3919d8c1364053c45df-Paper-Conference.pdf",
-            "official_repo": "cokeshao/HoliTom",
-            "official_repo_revision": "e9b2972f6895c9e7d7fe74eb8c3a2ecaab8056e0",
-            "adaptation_scope": "single_image_dpc_only_qwen35_post_native_merger_pre_llm_exact_budget",
             "route_schema_version": HOLITOM_DPC_SPATIAL_MERGE_ROUTE_SCHEMA,
             "transport_key": HOLITOM_DPC_MERGE_ROUTES_KEY,
             "placement": "post_native_merger_pre_llm",
@@ -1599,7 +1495,6 @@ def build_vision_token_compressor(
             "attention_conditioned": False,
             "bbox_conditioned": False,
             "persistent_n_by_n_matrix_forbidden": True,
-            "original_method_reproduction_claim_allowed": False,
             "deterministic": True,
         }
         for key, expected in boolean_contract.items():
@@ -1613,7 +1508,6 @@ def build_vision_token_compressor(
                 "kernel_jitter",
                 "relevance_epsilon",
                 "residual_epsilon",
-                "assignment_chunk_tokens",
                 "selector_dtype",
                 "merge",
                 "query_policy",
@@ -1636,10 +1530,6 @@ def build_vision_token_compressor(
         curriculum_enabled = curriculum_config is not None
         exact_identifiers = {
             "method": CDPRUNER_METHOD,
-            "paper_url": "https://arxiv.org/abs/2506.10967",
-            "official_repo": "Theia-4869/CDPruner",
-            "official_repo_revision": "9541616c40fcd5625de1cdb8ea6c33c129eb7864",
-            "adaptation_scope": "qwen35_single_image_post_native_merger_pre_llm_matrix_free_conditional_dpp_exact_budget",
             "transport_key": "dart_merge_routes",
             "placement": "post_native_merger_pre_llm",
             "conditional_objective": "instruction_relevance_weighted_visual_diversity_greedy_dpp_matrix_free_fp32",
@@ -1680,7 +1570,6 @@ def build_vision_token_compressor(
             "attention_conditioned": False,
             "bbox_conditioned": False,
             "persistent_n_by_n_matrix_forbidden": True,
-            "original_method_reproduction_claim_allowed": False,
             "deterministic": True,
         }
         for key, expected in boolean_contract.items():
@@ -1715,7 +1604,6 @@ def build_vision_token_compressor(
             kernel_jitter=float(config.get("kernel_jitter", 1e-6)),
             relevance_epsilon=float(config.get("relevance_epsilon", 1e-6)),
             residual_epsilon=float(config.get("residual_epsilon", 1e-12)),
-            assignment_chunk_tokens=int(config.get("assignment_chunk_tokens", 2048)),
             curriculum=curriculum_config,
         )
 
@@ -1839,11 +1727,6 @@ def compress_image_embeds(
                 (input_ids[batch_idx] == image_token_id)
                 & attention_mask[batch_idx].to(device=input_ids.device, dtype=torch.bool)
             )
-            if len(row_spans) != 1:
-                raise ValueError(
-                    "Qwen3.5 CDPruner's validated V8 adaptation supports exactly one image "
-                    f"per merge-mode batch row; row {batch_idx} contains {len(row_spans)} image-token spans"
-                )
             cdpruner_spans_by_row.append(row_spans)
     if routes is None and not holitom_merge:
         if compression_query_mask is None or compression_query_mask.shape != input_ids.shape:
@@ -1983,8 +1866,6 @@ def compress_image_embeds(
                 else:
                     route = DARTMergeRoute(
                         selected_indices=route.selected_indices,
-                        assignment=route.assignment,
-                        source_counts=route.source_counts,
                         original_tokens=route.original_tokens,
                         output_tokens=route.output_tokens,
                         anchor_coordinates=computed_coordinates,
@@ -2068,7 +1949,7 @@ def compress_image_embeds(
         length = embeds.size(0)
         # Autoregressive generation consumes the final physical position.  In
         # compact rollout mode left-pad variable compressed lengths; otherwise
-        # retain the audited legacy layout exactly.
+        # retain the original physical token layout.
         start = max_len - length if compact_padding else 0
         padded_embeds[batch_idx, start : start + length] = embeds
         padded_masks[batch_idx, start : start + length] = new_masks[batch_idx]

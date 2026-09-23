@@ -54,7 +54,7 @@ The default configuration uses eight GPUs and full-parameter training, including
 | Objective | Token-level JSD |
 | Visual-token curriculum | 25% for 14 updates, cosine decay, 5% for the final 75 updates |
 
-Use `--dry-run` to inspect the resolved configuration and `--resume` to continue a saved run.
+Set `--gpus` and `--nodes` for your hardware. Use `--resume` to continue a saved run.
 
 ## Evaluation
 

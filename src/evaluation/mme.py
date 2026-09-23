@@ -1,11 +1,8 @@
 """MME prompt, routing, answer transport, and paired sharding from the V8 evaluator."""
 from __future__ import annotations
-import hashlib, json
+import hashlib
 from collections.abc import Mapping, Sequence
 from typing import Any
-
-def canonical_sha256(value):
-    return hashlib.sha256((json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(",", ":"),allow_nan=False)+"\n").encode()).hexdigest()
 
 MME_REPLACE_PROMPT = " Please answer yes or no."
 
@@ -146,7 +143,6 @@ def row_metadata(row: Mapping[str, Any], row_index: int) -> dict[str, Any]:
         "answer": normalized_answer(str(row["answer"])),
         "category": category,
     }
-    payload["canonical_sha256"] = canonical_sha256(payload)
     return payload
 
 
