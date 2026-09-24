@@ -1,6 +1,6 @@
 # Evaluation
 
-Inference uses the exported Qwen3.5 CDPruner runtime at 5% retention, with a minimum of 32 tokens per image. Prompts, image ordering, generation limits, and answer transport follow the V8 evaluation. MMMU multi-image questions use independent pruning for each image.
+Inference uses the exported Qwen3.5 CDPruner runtime at 5% retention, with a minimum of 32 tokens per image. MMMU multi-image questions use independent pruning for each image.
 
 | Dataset | Split / examples | New tokens | Scoring |
 | --- | --- | ---: | --- |
@@ -22,8 +22,6 @@ Download the eight pinned benchmark splits and create `data/benchmarks/datasets.
 python src/evaluation/prepare_data.py --output data/benchmarks \
   --textvqa-json /path/to/TextVQA_0.5.1_val.json --textvqa-images /path/to/textvqa/images
 ```
-
-The TextVQA arguments add your existing official validation data; omit both to prepare the other eight datasets. `--datasets mmmu gqa` selects a subset. File versions and checksums are listed in `benchmark_sources.json`; downloads and caches stay under `--output`.
 
 ```bash
 pip install -e '.[eval]'
