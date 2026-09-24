@@ -25,6 +25,8 @@
 
 > A student using CDPruner learns from a frozen full-token teacher on its own generated prefixes. This repository contains the Qwen3.5-4B training implementation, the LT-OPD-14K data pipeline, and evaluation code for nine benchmarks.
 
+![](figs/example.png)
+
 ---
 
 
