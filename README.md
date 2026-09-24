@@ -27,7 +27,17 @@
 
 ![](figs/example.png)
 
+---  
+
+### Pipeline
+
+![](figs/pipeline.png)
+
 ---
+
+## 🔖 TODO
+
+- [ ] Release checkpoints.
 
 
 ## Setup
