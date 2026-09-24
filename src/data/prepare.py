@@ -184,6 +184,15 @@ def materialize(release: Path, output: Path, roots: list[Path], download_pixmo: 
     for index, (row, item) in enumerate(zip(rows, items, strict=True)):
         if row['sample_uid'] != item['sample_uid'] or item['index'] != index:
             raise ValueError(f'Media identity mismatch at row {index}')
+        profiles = (row['extra_info'] or {}).get('visual_capacity_profiles')
+        if not profiles:
+            raise ValueError(f'Row {index} carries no visual capacity profile for rollout packing')
+        for name, profile in profiles.items():
+            for field in ('max_pixels', 'dense_visual_tokens', 'dense_teacher_prompt_tokens',
+                          'merged_student_prompt_tokens', 'raw_patch_tokens_per_view'):
+                value = profile.get(field)
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise ValueError(f'Capacity profile {name} at row {index} has an invalid {field}: {value!r}')
         if row['images'] != row['teacher_images'] or row['images'] != [{'path': item['path']}]:
             raise ValueError(f'Student/teacher image mismatch at row {index}')
         for field in ('images', 'teacher_images'):
