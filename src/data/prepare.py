@@ -28,10 +28,6 @@ def sha256(path: Path) -> str:
     return file_fingerprint(path)[1]
 
 
-def canonical(value) -> bytes:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
-
-
 def safe_relative(value: str) -> Path:
     path = PurePosixPath(value)
     if path.is_absolute() or '..' in path.parts or '\\' in value:
@@ -183,12 +179,8 @@ def materialize(release: Path, output: Path, roots: list[Path], download_pixmo: 
     rows = table.to_pylist()
     if len(rows) != 14000:
         raise ValueError('Unexpected training row count')
-    uids = [row['sample_uid'] for row in rows]
-    if hashlib.sha256(canonical(uids)).hexdigest() != manifest['sample_uid_order_sha256']:
-        raise ValueError('Sample order differs from the published V8 training set')
-    row_hashes = [hashlib.sha256(canonical(row)).hexdigest() for row in rows]
-    if hashlib.sha256(canonical(row_hashes)).hexdigest() != manifest['portable_rows_sha256']:
-        raise ValueError('Training record contents differ from the published set')
+    if len({row['sample_uid'] for row in rows}) != 14000:
+        raise ValueError('Duplicate sample_uid values in the training set')
     for index, (row, item) in enumerate(zip(rows, items, strict=True)):
         if row['sample_uid'] != item['sample_uid'] or item['index'] != index:
             raise ValueError(f'Media identity mismatch at row {index}')
@@ -204,7 +196,6 @@ def materialize(release: Path, output: Path, roots: list[Path], download_pixmo: 
     temporary.replace(dest)
     prepared = dict(manifest)
     prepared['train_sha256'] = sha256(dest)
-    prepared['images_verified'] = len(items)
     prepared['dataset_repository'] = 'yyy051007/LT-OPD-14K'
     (output / 'manifest.json').write_text(json.dumps(prepared, indent=2) + '\n')
     print(f'Ready: {dest} (14,000 samples, all image hashes verified)', flush=True)

@@ -18,7 +18,7 @@ pip install flash-attn==2.8.3 --no-build-isolation
 
 ## Data
 
-LT-OPD-14K contains 14,000 examples from OneThinker, PixMo, LLaVA, TextVQA, and Vision-OPD. The Hugging Face release preserves the training order and includes source references and image hashes. Available image archives and instructions for obtaining the remaining upstream images are included in the dataset card.
+LT-OPD-14K contains 14,000 examples from OneThinker, PixMo, LLaVA, TextVQA, and Vision-OPD. The Hugging Face release keeps the training order and records per-sample provenance and image hashes. Image archives and the instructions for obtaining the remaining upstream images are in the dataset card.
 
 ```bash
 python -m data.prepare --dataset yyy051007/LT-OPD-14K \
