@@ -126,7 +126,7 @@ We present the performance of LT-OPD compared with previous SOTA methods.
   <img width="900" src="figs/main_results.png">
 </p>
 
-- Results in Fig. 4 of the main paper
+- Results in Fig. 4 of the main paper (compared with RL algorithms)
 
 <p align="center">
   <img width="900" src="figs/comparisons.png">
@@ -136,10 +136,10 @@ We present the performance of LT-OPD compared with previous SOTA methods.
 <details open>
 <summary>Compared with RL algorithms</summary>
 
-- Results in Tab.6 of the main paper
+- Results in Tab.4 of the main paper (cross-model performance)
 
 <p align="center">
-  <img width="900" src="figs/rl.png">
+  <img width="900" src="figs/cross-model.png">
 </p>
 </details>
 
