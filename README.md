@@ -12,7 +12,7 @@
 <a href="https://github.com/Yrxxxxxxxx1007/LT-OPD/stargazers" target='_blank' style="text-decoration: none;"><img src="https://img.shields.io/github/stars/Yrxxxxxxxx1007/LT-OPD"></a>
 </div>  
 
-[project](https://github.com/Yrxxxxxxxx1007/LT-OPD) · [Training data](https://huggingface.co/datasets/yyy051007/LT-OPD-14K) · [Evaluation](src/evaluation/README.md)
+[Project](https://github.com/Yrxxxxxxxx1007/LT-OPD) · [Training data](https://huggingface.co/datasets/yyy051007/LT-OPD-14K) · [Evaluation](src/evaluation/README.md)
 
 
 #### 🔥🔥🔥 News
@@ -21,7 +21,7 @@
 
 ---
 
-> **Brief Description** On-policy distillation for vision-language models with extremely reduced visual tokens.
+> **Brief Description:** On-policy distillation for vision-language models with extremely reduced visual tokens.
 
 > A student using CDPruner learns from a frozen full-token teacher on its own generated prefixes. This repository contains the Qwen3.5-4B training implementation, the LT-OPD-14K data pipeline, and evaluation code for nine benchmarks.
 
