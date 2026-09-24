@@ -35,7 +35,7 @@
 
 ---
 
-## 🔖 TODO
+## TODO
 
 - [ ] Release checkpoints.
 
@@ -111,6 +111,51 @@ src/
 ├── verl/          # Training core, JSD, Qwen3.5 integration, and CDPruner
 ├── data/          # LT-OPD-14K preparation
 └── evaluation/    # Benchmark inference and scoring
+```
+
+## <a name="results"></a>🔎 Results
+
+We present the performance of LT-OPD compared with previous SOTA methods.
+
+<details open>
+<summary>Main Results (click to expand)</summary>
+
+- Results in Tab.2 of the main paper
+
+<p align="center">
+  <img width="900" src="figs/main_results.png">
+</p>
+
+- Results in Fig. 4 of the main paper
+
+<p align="center">
+  <img width="900" src="figs/comparisons.png">
+</p>
+</details>
+
+<details open>
+<summary>Compared with RL algorithms</summary>
+
+- Results in Tab.6 of the main paper
+
+<p align="center">
+  <img width="900" src="figs/rl.png">
+</p>
+</details>
+
+
+
+## <a name="citation"></a>📎 Citation
+
+If you find our dataset and code helpful in your research or work, please cite the following paper.
+
+```
+@article{li2026fewer,
+      title={Fewer Tokens, More Self-Teaching: On-Policy Self-Distillation for Extreme Visual Token Reduction}, 
+      author={Junxian Li and Ruixuan Yang and Tianao Zhang and Tiange Xu and Weisheng Dong and Yulun Zhang},
+      journal={arXiv preprint arXiv:2609.xxxxx},
+      year={2026}
+}
 ```
 
 ## Acknowledgements
