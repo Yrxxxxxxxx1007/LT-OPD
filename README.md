@@ -1,10 +1,32 @@
-# LT-OPD
+# Fewer Tokens, More Self-Teaching: On-Policy Self-Distillation for Extreme Visual Token Reduction    
+[Junxian Li](https://lijunxian111.github.io), [Ruixuan Yang](https://openreview.net/profile?id=~Ruixuan_Yang2), [Tianao Zhang](https://scholar.google.com/citations?user=Cb34iaEAAAAJ&hl=en&oi=ao), [Tiange Xu](http://openreview.net/profile?id=~Tiange_Xu1), [Weisheng Dong](https://scholar.google.com/citations?user=-g58LsoAAAAJ&hl=en&oi=ao), and [Yulun Zhang](https://yulunzhang.com)  
 
-On-policy distillation for vision-language models with reduced visual tokens.
+"Fewer Tokens, More Self-Teaching: On-Policy Self-Distillation for Extreme Visual Token Reduction", arXiv 2026  
 
-A student using CDPruner learns from a frozen full-token teacher on its own generated prefixes. This repository contains the Qwen3.5-4B training implementation, the LT-OPD-14K data pipeline, and evaluation code for nine benchmarks.
+<div>
+<a href="https://github.com/Yrxxxxxxxx1007/LT-OPD" target='_blank' style="text-decoration: none;"><img src="https://img.shields.io/github/downloads/Yrxxxxxxxx1007/LT-OPD/total?color=green"></a>
+<a href="https://github.com/Yrxxxxxxxx1007/LT-OPD" target='_blank' style="text-decoration: none;"><img src="https://visitor-badge.laobi.icu/badge?page_id=Yrxxxxxxxx1007/LT-OPD"></a>
+<a href="">
+    <img src="https://img.shields.io/badge/Paper-arXiv-red?logo=arxiv&logoSvg">
+  </a>
+<a href="https://github.com/Yrxxxxxxxx1007/LT-OPD/stargazers" target='_blank' style="text-decoration: none;"><img src="https://img.shields.io/github/stars/Yrxxxxxxxx1007/LT-OPD"></a>
+</div>  
 
-[Training data](https://huggingface.co/datasets/yyy051007/LT-OPD-14K) · [Evaluation](src/evaluation/README.md)
+[project](https://github.com/Yrxxxxxxxx1007/LT-OPD) · [Training data](https://huggingface.co/datasets/yyy051007/LT-OPD-14K) · [Evaluation](src/evaluation/README.md)
+
+
+#### 🔥🔥🔥 News
+
+- **2026-09-25:** This repo is released.
+
+---
+
+> **Brief Description** On-policy distillation for vision-language models with extremely reduced visual tokens.
+
+> A student using CDPruner learns from a frozen full-token teacher on its own generated prefixes. This repository contains the Qwen3.5-4B training implementation, the LT-OPD-14K data pipeline, and evaluation code for nine benchmarks.
+
+---
+
 
 ## Setup
 
