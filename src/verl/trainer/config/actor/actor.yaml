@@ -131,7 +131,7 @@ self_distillation:
   # Whether to add a tail bucket when using distillation_topk
   distillation_add_tail: True
 
-  # Exp3 uses student top100 ∪ teacher top100 ∪ rollout token ∪ tail.
+  # Support set: student top-100, teacher top-100, rollout tokens, plus the aggregated tail.
   distillation_support_policy: student_topk
 
   # KL interpolation coefficient: 0.0=forward KL, 1.0=reverse KL, in-between=JSD

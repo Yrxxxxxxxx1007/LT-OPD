@@ -1067,7 +1067,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             unexpected_trainables = sorted(set(trainable_inventory) - lora_trainables - merger_trainables)
             if not lora_trainables or (train_native_visual_merger and (not merger_trainables)):
                 raise RuntimeError(
-                    f"Incomplete Exp3 trainable inventory: lora={len(lora_trainables)}, merger={len(merger_trainables)}"
+                    f"Incomplete trainable inventory: lora={len(lora_trainables)}, merger={len(merger_trainables)}"
                 )
             if unexpected_trainables:
                 raise RuntimeError(
@@ -1077,7 +1077,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 (name for name, parameter in trainable_inventory.items() if parameter.dtype != torch.float32)
             )
             if non_fp32:
-                raise TypeError(f"Exp3 trainable master parameters are not FP32: {non_fp32[:20]}")
+                raise TypeError(f"Trainable master parameters are not FP32: {non_fp32[:20]}")
             if self.rank == 0:
                 print(
                     f"[actor model] Exact trainable inventory verified: lora_tensors={len(lora_trainables)}, native_visual_merger_tensors={len(merger_trainables)}."
@@ -2167,7 +2167,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             merger_path = os.path.join(local_path, "native_visual_merger", "model.safetensors")
             manifest_path = os.path.join(local_path, "native_visual_merger", "manifest.json")
             if not os.path.isfile(merger_path) or not os.path.isfile(manifest_path):
-                raise FileNotFoundError("Exact Exp3 resume requires native_visual_merger model and manifest artifacts")
+                raise FileNotFoundError("Exact resume requires native_visual_merger model and manifest artifacts")
             saved_merger = load_file(merger_path, device="cpu")
             with FSDP.summon_full_params(self.actor_module_fsdp, writeback=False):
                 peft_model = getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
