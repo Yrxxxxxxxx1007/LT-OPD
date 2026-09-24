@@ -14,8 +14,6 @@ Inference uses the exported Qwen3.5 CDPruner runtime at 5% retention, with a min
 | [TextVQA](https://textvqa.org/) | v0.5.1 validation / 5,000 | 1024 | Author ten-answer VQA soft accuracy |
 | [OCRBench](https://github.com/Yuliang-Liu/MultimodalOCR) | test / 1,000 | 128 | Author score / 1,000 |
 
-V*Bench here follows the generated-answer protocol used in our experiments; the original author's candidate-likelihood protocol is a different evaluation. HRBench and MMBench use deterministic official parsing; unresolved cases are marked `pending_judge` for judge evaluation. MMMU retains the author's seeded random fallback and reports its count.
-
 ## Data and inference
 
 Download the eight pinned benchmark splits and create `data/benchmarks/datasets.json`:
