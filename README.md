@@ -96,7 +96,7 @@ Export the trained checkpoint:
 
 ```bash
 python -m training.export \
-  --checkpoint outputs/lt-opd/checkpoints/global_step_175 \
+  --checkpoint /path/to/saved_checkpoint \
   --base-model models/Qwen3.5-4B \
   --output outputs/lt-opd/export
 ```
