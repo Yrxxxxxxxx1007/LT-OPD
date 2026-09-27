@@ -16,7 +16,7 @@ Inference uses the exported Qwen3.5 CDPruner runtime at 5% retention, with a min
 
 ## Data and inference
 
-Download the eight pinned benchmark splits and create `data/benchmarks/datasets.json`:
+Prepare the benchmark data and create `data/benchmarks/datasets.json`:
 
 ```bash
 python src/evaluation/prepare_data.py --output data/benchmarks \
