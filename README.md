@@ -17,7 +17,7 @@
 
 #### 🔥🔥🔥 News
 
-- **2026-09-25:** This repo is released.
+- **2026-09-25:** This repo (code and data) is released.
 
 ---
 
