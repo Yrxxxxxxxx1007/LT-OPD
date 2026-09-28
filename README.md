@@ -51,7 +51,9 @@ src/
 └── evaluation/    # Benchmark inference and scoring
 ```
 If you want to use the codes, please:  
-```cd src```  
+```bash
+cd src
+```  
 
 
 ## Setup
