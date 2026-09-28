@@ -4,6 +4,7 @@
 "Fewer Tokens, More Self-Teaching: On-Policy Self-Distillation for Extreme Visual Token Reduction", arXiv 2026  
 
 <div>
+  <a href="https://github.com/Yrxxxxxxxx1007/LT-OPD/releases" target='_blank' style="text-decoration: none;"><img src="https://img.shields.io/github/downloads/Yrxxxxxxxx1007/LT-OPD/total?color=green"></a>
 <a href="https://huggingface.co/datasets/yyy051007/LT-OPD-14K" target="_blank">
   <img src="https://img.shields.io/badge/huggingface-repo-yellow?logo=huggingface&logoColor=white"></a>
 <a href="https://github.com/Yrxxxxxxxx1007/LT-OPD" target='_blank' style="text-decoration: none;"><img src="https://visitor-badge.laobi.icu/badge?page_id=Yrxxxxxxxx1007/LT-OPD"></a>
