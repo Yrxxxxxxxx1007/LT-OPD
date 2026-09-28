@@ -41,6 +41,18 @@
 
 - [ ] Release checkpoints.
 
+## Code layout
+
+```text
+src/
+├── training/      # Training configuration, launcher, and checkpoint export
+├── verl/          # Training core, JSD, Qwen3.5 integration, and CDPruner
+├── data/          # LT-OPD-14K preparation
+└── evaluation/    # Benchmark inference and scoring
+```
+If you want to use the codes, please:  
+```cd src```  
+
 
 ## Setup
 
@@ -102,15 +114,6 @@ python -m training.export \
 
 The evaluation suite covers **V*Bench, HRBench-4K, GQA, MMMU, MMBench, MME, POPE, TextVQA, and OCRBench**. Inference and scoring are separate commands; dataset preparation, protocol details, and scorer versions are listed in the [evaluation guide](src/evaluation/README.md).
 
-## Code layout
-
-```text
-src/
-├── training/      # Training configuration, launcher, and checkpoint export
-├── verl/          # Training core, JSD, Qwen3.5 integration, and CDPruner
-├── data/          # LT-OPD-14K preparation
-└── evaluation/    # Benchmark inference and scoring
-```
 
 ## <a name="results"></a>🔎 Results
 
