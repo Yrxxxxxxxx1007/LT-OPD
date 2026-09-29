@@ -153,7 +153,7 @@ We present the performance of LT-OPD compared with previous SOTA methods.
 
 If you find our dataset and code helpful in your research or work, please cite the following paper.
 
-```
+```ruby
 @article{li2026fewer,
       title={Fewer Tokens, More Self-Teaching: On-Policy Self-Distillation for Extreme Visual Token Reduction}, 
       author={Li Junxian and Yang Ruixuan and Zhang Tianao and Xu Tiange and Dong Weisheng and Zhang Yulun},
