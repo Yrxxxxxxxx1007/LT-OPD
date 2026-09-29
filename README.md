@@ -8,7 +8,7 @@
 <a href="https://huggingface.co/datasets/yyy051007/LT-OPD-14K" target="_blank">
   <img src="https://img.shields.io/badge/huggingface-repo-yellow?logo=huggingface&logoColor=white"></a>
 <a href="https://github.com/Yrxxxxxxxx1007/LT-OPD" target='_blank' style="text-decoration: none;"><img src="https://visitor-badge.laobi.icu/badge?page_id=Yrxxxxxxxx1007/LT-OPD"></a>
-<a href="https://arxiv.org/pdf/2609.32353">
+<a href="https://arxiv.org/abs/2609.32353">
     <img src="https://img.shields.io/badge/Paper-arXiv-red?logo=arxiv&logoSvg">
   </a>
 <a href="https://github.com/Yrxxxxxxxx1007/LT-OPD/stargazers" target='_blank' style="text-decoration: none;"><img src="https://img.shields.io/github/stars/Yrxxxxxxxx1007/LT-OPD"></a>
