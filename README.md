@@ -156,7 +156,7 @@ If you find our dataset and code helpful in your research or work, please cite t
 ```
 @article{li2026fewer,
       title={Fewer Tokens, More Self-Teaching: On-Policy Self-Distillation for Extreme Visual Token Reduction}, 
-      author={Junxian Li and Ruixuan Yang and Tianao Zhang and Tiange Xu and Weisheng Dong and Yulun Zhang},
+      author={Li Junxian and Yang Ruixuan and Zhang Tianao and Xu Tiange and Dong Weisheng and Zhang Yulun},
       journal={arXiv preprint arXiv:2609.32353},
       year={2026}
 }
