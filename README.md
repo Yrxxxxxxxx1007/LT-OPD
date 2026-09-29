@@ -8,7 +8,7 @@
 <a href="https://huggingface.co/datasets/yyy051007/LT-OPD-14K" target="_blank">
   <img src="https://img.shields.io/badge/huggingface-repo-yellow?logo=huggingface&logoColor=white"></a>
 <a href="https://github.com/Yrxxxxxxxx1007/LT-OPD" target='_blank' style="text-decoration: none;"><img src="https://visitor-badge.laobi.icu/badge?page_id=Yrxxxxxxxx1007/LT-OPD"></a>
-<a href="">
+<a href="https://arxiv.org/pdf/2609.32353">
     <img src="https://img.shields.io/badge/Paper-arXiv-red?logo=arxiv&logoSvg">
   </a>
 <a href="https://github.com/Yrxxxxxxxx1007/LT-OPD/stargazers" target='_blank' style="text-decoration: none;"><img src="https://img.shields.io/github/stars/Yrxxxxxxxx1007/LT-OPD"></a>
@@ -157,7 +157,7 @@ If you find our dataset and code helpful in your research or work, please cite t
 @article{li2026fewer,
       title={Fewer Tokens, More Self-Teaching: On-Policy Self-Distillation for Extreme Visual Token Reduction}, 
       author={Junxian Li and Ruixuan Yang and Tianao Zhang and Tiange Xu and Weisheng Dong and Yulun Zhang},
-      journal={arXiv preprint arXiv:2609.xxxxx},
+      journal={arXiv preprint arXiv:2609.32353},
       year={2026}
 }
 ```
