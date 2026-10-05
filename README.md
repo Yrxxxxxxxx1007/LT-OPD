@@ -37,14 +37,12 @@
 
 ---
 
-## TODO
-
-- [ ] Release checkpoints.
 
 ## Code layout
 
 ```text
 src/
+├── learnable_merge # The latest and best version of our LT-OPD: adding a tiny learnable merging module after CDPruner  
 ├── training/      # Training configuration, launcher, and checkpoint export
 ├── verl/          # Training core, JSD, Qwen3.5 integration, and CDPruner
 ├── data/          # LT-OPD-14K preparation
