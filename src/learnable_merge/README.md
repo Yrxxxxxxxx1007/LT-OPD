@@ -26,7 +26,7 @@ lt-opd --implementation current train \
   --output "$RUN_DIR"
 ```
 
-Use `--gpus` or `CUDA_VISIBLE_DEVICES` to select GPUs, and `--cpus` to set the local Ray CPU allocation. Use `--resume` to continue a saved run.
+Set `CUDA_VISIBLE_DEVICES` to select devices and `--gpus` to set how many to use. Use `--cpus` to set the local Ray CPU allocation and `--resume` to continue a saved run.
 
 Persistent outputs and caches stay under `--user-root`. Ray's temporary object store uses `/dev/shm` by default; `--ram-object-store-dir` can select a directory under `--user-root` when shared memory is limited.
 
