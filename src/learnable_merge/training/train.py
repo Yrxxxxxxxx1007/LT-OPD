@@ -203,7 +203,7 @@ def main():
     args = parser.parse_args()
     config = build_config(args.model, args.data_dir, args.output, args.resume, args.gpus, args.nodes, args.config)
     if config.data.get('vqa20k_mixture') == 'lt15k' and (config.trainer.n_gpus_per_node, args.nodes) != (4, 1):
-        raise ValueError('The LT-15K recipe requires one node with four A800 80GB GPUs')
+        raise ValueError('The LT-15K batch plan requires the GPU layout specified in the default recipe')
     from verl.utils.config import validate_config
     validate_config(config, use_reference_policy=True, use_critic=False)
     if not (args.data_dir/'train.parquet').is_file():

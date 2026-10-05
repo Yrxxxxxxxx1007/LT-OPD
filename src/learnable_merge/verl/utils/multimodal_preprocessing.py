@@ -1,11 +1,7 @@
-"""Audited multimodal preprocessing shared by DART student and teacher paths.
+"""Image preprocessing shared by student and teacher.
 
-Qwen's convenience ``process_vision_info`` helper resizes still images before
-the Hugging Face image processor sees them.  Passing those already-resized
-images to the processor performs a second interpolation and can make the
-student pixels/grid differ from the fixed teacher even when both rows point to
-the same source file.  DART still images must therefore be loaded as raw RGB
-PIL images and resized exactly once by the model's processor.
+Load raw RGB images and resize them once with the model's processor, keeping
+student and teacher inputs consistent.
 """
 
 from __future__ import annotations

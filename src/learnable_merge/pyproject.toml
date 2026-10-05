@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lt-opd-learnable-merge"
 version = "0.3.0"
-description = "LT-OPD with learnable visual node aggregation"
+description = "LT-OPD training and inference"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "Apache-2.0"

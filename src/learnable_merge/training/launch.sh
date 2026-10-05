@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: launch_v12_4xa800.sh USER_ROOT MODEL DATA_DIR OUTPUT [--prepare-only|--resume]
+# Usage: launch.sh USER_ROOT MODEL DATA_DIR OUTPUT [--prepare-only|--resume]
 if [[ $# -lt 4 ]]; then
   echo "Usage: $0 USER_ROOT MODEL DATA_DIR OUTPUT [--prepare-only|--resume]" >&2
   exit 2

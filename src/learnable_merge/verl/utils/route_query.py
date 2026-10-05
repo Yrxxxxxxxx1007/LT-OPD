@@ -1,9 +1,7 @@
-"""Strict, auditable route-query extraction for conditional visual pruning.
+"""Question extraction for conditional visual pruning.
 
-The visual-token router may inspect only the semantic multiple-choice query:
-the question stem and the four answer options.  Prompt boilerplate, response
-format instructions, image placeholders, and assistant text are deliberately
-outside this contract.
+Routing uses the question and any answer options, excluding prompt formatting,
+image placeholders, and assistant text.
 """
 
 from __future__ import annotations
@@ -15,10 +13,8 @@ from dataclasses import dataclass
 from typing import Any
 
 
-# Keep the public V1 name for archived V4 artifacts.  V2 generalizes the
-# semantic query from exactly A-D MCQ to one question plus zero or more source
-# options, which is required by the mixed VQA13K release.  Both schemas select
-# only user-authored semantic text; neither admits prompt boilerplate.
+# V1 supports A-D multiple-choice queries. V2 supports a question with any
+# number of options. Both schemas use only the user's question text.
 ROUTE_QUERY_SCHEMA_VERSION_V1 = "vision_opd_route_query_v1"
 ROUTE_QUERY_SCHEMA_VERSION_V2 = "vision_opd_route_query_v2"
 ROUTE_QUERY_SCHEMA_VERSION = ROUTE_QUERY_SCHEMA_VERSION_V1

@@ -2,50 +2,15 @@
 #
 # Licensed under the Apache License, Version 2.0.
 
-"""Deterministic visual-token pruning and spatial merging for Qwen3.5.
+"""Visual-token pruning and aggregation for Qwen3.5.
 
-The sixth-release formal method is
-``qwen35_holitom_dpc_spatial_merge_v1``.  It runs after Qwen's native visual
-merger and before the language model, clusters detached FP32 post-merger
-embeddings with an exact, chunked DPC-KNN route, and replaces each cluster by
-the arithmetic mean of its original differentiable embeddings.  It keeps
-exactly ``min(N, max(32, ceil(0.05 * N)))`` centers, ordered by original token
-index, with the original M-RoPE coordinate of each center.  Route construction
-uses no question, attention, bounding box, reward, or assistant token.
+CDPruner selects tokens after the visual merger. Discarded tokens are assigned
+to their nearest retained token by FP32 cosine similarity. An MLP learns
+bounded signed residual contributions, initialized to zero. The output keeps
+the retained tokens' sequence order and M-RoPE positions without adding tokens.
 
-The curriculum variant ``qwen35_holitom_dpc_spatial_merge_curriculum_v2``
-uses the same routes with the active optimizer-step budget. Its serialized
-routes bind the retention, completed step and configured schedule digest;
-cluster means accumulate in FP32 before casting back to the model dtype.
-
-The fourth-release default is ``qwen35_cdpruner_v1``: a matrix-free adaptation
-of CDPruner's conditional-DPP objective placed after Qwen's native visual
-merger and before the first LLM layer.  It keeps exactly
-``min(N, max(32, ceil(0.05 * N)))`` original tokens per image, in original
-sequence order, together with their original M-RoPE coordinates.  It never
-averages or otherwise merges visual embeddings.
-
-``qwen35_conditional_diversity_prune_v1`` and its DART-named public symbols are
-retained as the third-release compatibility path.  Both route builders use
-only an explicit inference-visible query mask; actor replay consumes the
-serialized route and therefore cannot accidentally inspect assistant answers.
-
-The optional CDPruner summary keeps that selected subset unchanged and adds
-one token representing every discarded source. Its real discarded anchor is
-chosen by cosine-kNN density; the weighted summary inherits that anchor's
-original position and is inserted in original token order. Separate summary
-route schemas bind this behavior across rollout, actor replay and export.
-The V11 ``learnable_residual_mlp_v1`` summary keeps that discrete route and
-FP32 cosine prior, then uses current visual features and a small MLP to learn
-bounded residual logits. Learned weights are recomputed with gradients on
-every actor forward; only the detached prior crosses route serialization.
-The V12 learnable merge adds no token: it assigns each discarded node to its
-nearest CDPruner-retained node by full-feature FP32 cosine similarity, and
-aggregates all original nodes into exactly the original K retained slots.
-Each group starts with the exact retained anchor embedding and zero discarded
-contribution. The MLP learns bounded signed residual weights against detached
-discarded-only cosine priors; these weights may become negative. The output
-inherits the retained anchors' original sequence and M-RoPE positions.
+Routes are shared between generation and training. The module also supports
+plain CDPruner selection, DPC spatial merging, and single-token summaries.
 """
 
 from __future__ import annotations

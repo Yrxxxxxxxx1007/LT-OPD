@@ -1,10 +1,4 @@
-"""Deterministic optimizer-step curriculum for visual-token retention.
-
-The schedule is deliberately integer-only.  It is driven by the number of
-successfully committed optimizer updates *before* the current update and is
-therefore invariant to rollout count, micro-batching, teacher chunks, retries,
-wall time, and diagnostic validation.
-"""
+"""Visual-token retention schedule driven by completed optimizer updates."""
 
 from __future__ import annotations
 

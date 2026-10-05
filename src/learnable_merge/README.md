@@ -22,15 +22,14 @@ pip install -e 'src/learnable_merge[train,eval]'
 
 ## Training
 
-The supplied recipe uses four A800 80 GB GPUs, a frozen full-token teacher, on-policy JSD, and the visual-token curriculum. Provide an existing prepared data directory containing `train.parquet` and its local images:
+Training uses a frozen full-token teacher, on-policy JSD, and a visual-token curriculum. The data directory should contain `train.parquet` and its images:
 
 ```bash
 python -m training.train \
   --model /path/to/Qwen3.5-4B \
   --data-dir /path/to/prepared-data \
   --user-root /path/to/user-storage \
-  --output /path/to/user-storage/outputs/lt-opd \
-  --gpus 4
+  --output /path/to/user-storage/outputs/lt-opd
 ```
 
 Use `--resume` to continue a saved run. Persistent outputs and runtime caches stay under `--user-root`.
