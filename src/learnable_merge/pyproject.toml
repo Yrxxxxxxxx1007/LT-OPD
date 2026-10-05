@@ -66,7 +66,7 @@ eval = [
 [project.urls]
 Repository = "https://github.com/Yrxxxxxxxx1007/LT-OPD"
 Paper = "https://arxiv.org/abs/2609.32353"
-Model = "https://huggingface.co/yyy051007/LT-OPD-learnable-merge"
+Model = "https://huggingface.co/yyy051007/LT-OPD"
 
 [project.scripts]
 lt-opd-merge-train = "training.train:main"

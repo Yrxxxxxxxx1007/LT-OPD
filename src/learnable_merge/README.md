@@ -1,6 +1,6 @@
-# LT-OPD · Learnable Node Aggregation
+# LT-OPD
 
-[Paper](https://arxiv.org/abs/2609.32353) · [Model](https://huggingface.co/yyy051007/LT-OPD-learnable-merge)
+[Paper](https://arxiv.org/abs/2609.32353) · [Model](https://huggingface.co/yyy051007/LT-OPD)
 
 CDPruner selects the visual tokens. Each discarded node is assigned to its nearest retained node in feature space, and an MLP learns its residual contribution. The retained nodes keep their original sequence order and M-RoPE positions; aggregation adds no tokens.
 
@@ -29,7 +29,7 @@ python -m training.train \
   --model /path/to/Qwen3.5-4B \
   --data-dir /path/to/prepared-data \
   --user-root /path/to/user-storage \
-  --output /path/to/user-storage/outputs/learnable-merge \
+  --output /path/to/user-storage/outputs/lt-opd \
   --gpus 4
 ```
 
@@ -40,8 +40,8 @@ Use `--resume` to continue a saved run. Persistent outputs and runtime caches st
 Download the model, then load it through the compression runtime:
 
 ```bash
-hf download yyy051007/LT-OPD-learnable-merge \
-  --local-dir models/LT-OPD-learnable-merge
+hf download yyy051007/LT-OPD \
+  --local-dir models/LT-OPD
 ```
 
 ```python
@@ -50,7 +50,7 @@ from evaluation.runtime import build_route_query
 from training.runtime import load_compression_runtime
 
 runtime = load_compression_runtime(
-    "models/LT-OPD-learnable-merge",
+    "models/LT-OPD",
     torch_dtype=torch.bfloat16,
     device_map={"": "cuda:0"},
 )
