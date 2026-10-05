@@ -6,7 +6,7 @@
 <div>
   <a href="https://github.com/Yrxxxxxxxx1007/LT-OPD/releases" target='_blank' style="text-decoration: none;"><img src="https://img.shields.io/github/downloads/Yrxxxxxxxx1007/LT-OPD/total?color=green"></a>
 <a href="https://huggingface.co/datasets/yyy051007/LT-OPD-14K" target="_blank">
-  <img src="https://img.shields.io/badge/Dataset-LT--OPD--14K-yellow?logo=huggingface&logoColor=white" alt="LT-OPD-14K dataset"></a>
+  <img src="https://img.shields.io/badge/huggingface-repo-yellow?logo=huggingface&logoColor=white"></a>
 <a href="https://github.com/Yrxxxxxxxx1007/LT-OPD" target='_blank' style="text-decoration: none;"><img src="https://visitor-badge.laobi.icu/badge?page_id=Yrxxxxxxxx1007/LT-OPD"></a>
 <a href="https://arxiv.org/abs/2609.32353">
     <img src="https://img.shields.io/badge/Paper-arXiv-red?logo=arxiv&logoSvg">
@@ -17,10 +17,10 @@
 [Project](https://github.com/Yrxxxxxxxx1007/LT-OPD) · [Training data](https://huggingface.co/datasets/yyy051007/LT-OPD-14K) · [Evaluation](src/evaluation/README.md) · [Checkpoints](src/learnable_merge)  
 
 
-## News
+#### 🔥🔥🔥 News
 
-- **2026-10-05:** The latest [LT-OPD checkpoint](src/learnable_merge) is available, improving retained performance from 82.3% to **84.5%** of the full-token model.
-- **2026-09-25:** Code and training data released.
+- **2026-10-05:** The trained checkpoints of [newest verstion](src/learnable_merge) of LT-OPD is released. The scores are higher, 82.3-><strong>84.5%</strong> of the full-token model!  
+- **2026-09-25:** This repo (code and data) is released.
 
 ---
 
@@ -43,11 +43,11 @@
 
 ```text
 src/
-├── learnable_merge/  # CDPruner with learned residual aggregation
-├── training/         # Training configuration, launcher, and checkpoint export
-├── verl/             # Training core, JSD, Qwen3.5 integration, and CDPruner
-├── data/             # LT-OPD-14K preparation
-└── evaluation/       # Benchmark inference and scoring
+├── learnable_merge # The latest and best version of our LT-OPD: adding a tiny learnable merging module after CDPruner  
+├── training/      # Training configuration, launcher, and checkpoint export
+├── verl/          # Training core, JSD, Qwen3.5 integration, and CDPruner
+├── data/          # LT-OPD-14K preparation
+└── evaluation/    # Benchmark inference and scoring
 ```
 Run the commands below from the repository root.
 
@@ -64,13 +64,13 @@ pip install flash-attn==2.8.3 --no-build-isolation
 
 ## Data
 
-LT-OPD-14K contains 14,000 examples from OneThinker, PixMo, LLaVA, TextVQA, and Vision-OPD. The dataset includes the annotations and images needed for training.
+LT-OPD-14K contains 14,000 examples from OneThinker, PixMo, LLaVA, TextVQA, and Vision-OPD. The Hugging Face release keeps the training order and ships every image in content-addressed tar shards, with per-sample provenance and SHA-256 recorded in `media.jsonl`.
 
 ```bash
 lt-opd data --dataset yyy051007/LT-OPD-14K --output data/LT-OPD-14K
 ```
 
-This command downloads the images and prepares the training files. Use `--source-media` to reuse an existing image directory.
+Preparation verifies the release checksums and all 14,000 images before writing the training files. Pass `--source-media` to reuse an image directory you already have.
 
 ## Training
 
@@ -134,7 +134,7 @@ We present the performance of LT-OPD compared with previous SOTA methods.
 </details>
 
 <details open>
-<summary>Cross-model Results</summary>
+<summary>Compared with RL algorithms</summary>
 
 - Results in Tab.4 of the main paper (cross-model performance)
 
@@ -149,7 +149,7 @@ We present the performance of LT-OPD compared with previous SOTA methods.
 
 If you find our dataset and code helpful in your research or work, please cite the following paper.
 
-```bibtex
+```ruby
 @article{li2026fewer,
       title={Fewer Tokens, More Self-Teaching: On-Policy Self-Distillation for Extreme Visual Token Reduction}, 
       author={Li Junxian and Yang Ruixuan and Zhang Tianao and Xu Tiange and Dong Weisheng and Zhang Yulun},
