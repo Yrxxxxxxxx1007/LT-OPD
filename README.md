@@ -19,6 +19,7 @@
 
 #### 🔥🔥🔥 News
 
+- **2026-09-25:** The trained checkpoints of [newest verstion](src/learnable_merge) of LT-OPD is released. The scores are higher!  
 - **2026-09-25:** This repo (code and data) is released.
 
 ---
