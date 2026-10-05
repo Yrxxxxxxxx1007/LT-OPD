@@ -146,7 +146,7 @@ class WellFormedAnswerTagCriteria(StoppingCriteria):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Advance tensor state and return prior finishes plus close candidates.
 
-        This method performs no host transfer.  The formal cached HF loop can
+        This method performs no host transfer.  The cached HF loop can
         copy candidate bits together with its already-required all-finished
         synchronization, then call :meth:`confirm_candidates` only for the
         rare matching rows.
@@ -263,7 +263,7 @@ class WellFormedAnswerTagCriteria(StoppingCriteria):
     def update(self, response_ids: torch.Tensor) -> torch.Tensor:
         finished, close_candidate = self.update_candidates(response_ids)
         # Generic Transformers generation has no exposed synchronization hook,
-        # so keep a correctness-first fallback here.  The formal DPC cached
+        # so keep a correctness-first fallback here.  The DPC cached
         # loop calls the split API and folds these bits into its existing sync.
         candidate_rows = (
             torch.nonzero(close_candidate, as_tuple=False)

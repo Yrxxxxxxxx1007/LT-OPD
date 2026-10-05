@@ -67,7 +67,7 @@ pip install flash-attn==2.8.3 --no-build-isolation
 LT-OPD-14K contains 14,000 examples from OneThinker, PixMo, LLaVA, TextVQA, and Vision-OPD. The Hugging Face release keeps the training order and ships every image in content-addressed tar shards, with per-sample provenance and SHA-256 recorded in `media.jsonl`.
 
 ```bash
-python -m data.prepare --dataset yyy051007/LT-OPD-14K --output data/LT-OPD-14K
+lt-opd data --dataset yyy051007/LT-OPD-14K --output data/LT-OPD-14K
 ```
 
 Preparation verifies the release checksums and all 14,000 images before writing the training files. Pass `--source-media` to reuse an image directory you already have.
@@ -81,7 +81,7 @@ hf download Qwen/Qwen3.5-4B \
   --revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a \
   --local-dir models/Qwen3.5-4B
 
-python -m training.train \
+lt-opd --implementation legacy train \
   --model models/Qwen3.5-4B \
   --data-dir data/LT-OPD-14K \
   --output outputs/lt-opd
@@ -97,14 +97,14 @@ The default configuration uses eight GPUs and full-parameter training, including
 | Objective | Token-level JSD |
 | Visual-token curriculum | 25% for 14 updates, cosine decay, 5% for the final 75 updates |
 
-Set `--gpus` and `--nodes` for your hardware. Use `--resume` to continue a saved run.
+Use `--config` for recipe overrides, `--gpus` and `--nodes` for GPU allocation, and `--cpus` for a new local Ray instance. Otherwise, GPU and node counts follow the recipe; local CPUs follow available resources and worker needs. GPU counts must remain compatible with the batch sizes. Use `--resume` to continue a saved run.
 
 ## Evaluation
 
 Export the trained checkpoint:
 
 ```bash
-python -m training.export \
+lt-opd --implementation legacy export \
   --checkpoint /path/to/saved_checkpoint \
   --base-model models/Qwen3.5-4B \
   --output outputs/lt-opd/export

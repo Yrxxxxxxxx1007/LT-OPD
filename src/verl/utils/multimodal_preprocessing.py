@@ -1,4 +1,4 @@
-"""Audited multimodal preprocessing shared by DART student and teacher paths.
+"""Multimodal preprocessing shared by DART student and teacher paths.
 
 Qwen's convenience ``process_vision_info`` helper resizes still images before
 the Hugging Face image processor sees them.  Passing those already-resized

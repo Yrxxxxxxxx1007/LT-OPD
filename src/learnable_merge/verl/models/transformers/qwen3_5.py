@@ -134,7 +134,7 @@ def _get_input_embeds(
             f"got {visual_compression_mode!r}"
         )
     if dart_merge_routes is not None and dpc_merge_routes is not None:
-        raise ValueError("Legacy dart_merge_routes and formal dpc_merge_routes are mutually exclusive")
+        raise ValueError("Legacy dart_merge_routes and dpc_merge_routes are mutually exclusive")
     if visual_compression_mode != "merge" and (
         dart_merge_routes is not None or dpc_merge_routes is not None or compression_query_mask is not None
     ):
@@ -173,9 +173,9 @@ def _get_input_embeds(
             replay_routes = None
             if isinstance(model.vision_token_compressor, VisionHoliTomDPCSpatialMergeCompressor):
                 if compression_query_mask is not None:
-                    raise ValueError("Formal HoliTom DPC merge is query-independent; query masks are forbidden")
+                    raise ValueError("HoliTom DPC merge is query-independent; query masks are forbidden")
                 if dart_merge_routes is not None:
-                    raise ValueError("Formal HoliTom DPC merge cannot consume legacy dart_merge_routes")
+                    raise ValueError("HoliTom DPC merge cannot consume legacy dart_merge_routes")
                 if dpc_merge_routes is not None:
                     replay_routes = [
                         route
@@ -187,7 +187,7 @@ def _get_input_embeds(
                         route.validate_for_algorithm(model.vision_token_compressor.algorithm)
             else:
                 if dpc_merge_routes is not None:
-                    raise ValueError("Legacy visual compressors cannot consume formal dpc_merge_routes")
+                    raise ValueError("Legacy visual compressors cannot consume dpc_merge_routes")
             if dart_merge_routes is not None:
                 expected_algorithm = getattr(
                     model,
@@ -255,7 +255,7 @@ def _get_input_embeds(
         inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
 
     if visual_compression_mode == "no_image":
-        # Formal ablation policy:
+        # No-image ablation policy:
         # same_prompt_image_placeholder_without_visual_replacement_v1.
         # Image/video placeholders deliberately remain in the exact public
         # token stream and use their ordinary token embeddings; no vision
@@ -358,7 +358,7 @@ def _select_hidden_states_for_logits(
     Transformers generation passes an integer (normally ``1``).  A compressed actor
     scoring additionally needs per-sample response positions because visual
     compression can produce a different physical response start for every
-    row, so a rank-2 index tensor is supported as an audited extension.
+    row, so a rank-2 index tensor is supported for these per-row offsets.
     """
 
     if isinstance(logits_to_keep, int):

@@ -25,7 +25,7 @@ python src/evaluation/prepare_data.py --output data/benchmarks \
 
 ```bash
 pip install -e '.[eval]'
-python src/evaluation/run.py \
+lt-opd eval \
   --export-dir outputs/lt-opd/export --data-config data/benchmarks/datasets.json \
   --output-dir results/lt-opd --gpus 0,1,2,3
 ```
@@ -38,7 +38,7 @@ Select a subset with `--datasets mmmu textvqa`. `--workers-per-gpu 2` increases 
 
 ```bash
 python src/evaluation/fetch_scorers.py --output-dir data/scorers
-python src/evaluation/score.py --dataset mmmu \
+lt-opd score --dataset mmmu \
   --predictions results/lt-opd/mmmu --sources data/scorers \
   --output results/lt-opd/mmmu-score.json
 ```

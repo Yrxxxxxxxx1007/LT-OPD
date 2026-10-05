@@ -4,7 +4,7 @@
 
 """Deterministic visual-token pruning and spatial merging for Qwen3.5.
 
-The sixth-release formal method is
+The spatial-merging method is
 ``qwen35_holitom_dpc_spatial_merge_v1``.  It runs after Qwen's native visual
 merger and before the language model, clusters detached FP32 post-merger
 embeddings with an exact, chunked DPC-KNN route, and replaces each cluster by
@@ -13,7 +13,7 @@ exactly ``min(N, max(32, ceil(0.05 * N)))`` centers, ordered by original token
 index, with the original M-RoPE coordinate of each center.  Route construction
 uses no question, attention, bounding box, reward, or assistant token.
 
-The fourth-release default is ``qwen35_cdpruner_v1``: a matrix-free adaptation
+The pruning method is ``qwen35_cdpruner_v1``: a matrix-free adaptation
 of CDPruner's conditional-DPP objective placed after Qwen's native visual
 merger and before the first LLM layer.  It keeps exactly
 ``min(N, max(32, ceil(0.05 * N)))`` original tokens per image, in original
@@ -21,7 +21,7 @@ sequence order, together with their original M-RoPE coordinates.  It never
 averages or otherwise merges visual embeddings.
 
 ``qwen35_conditional_diversity_prune_v1`` and its DART-named public symbols are
-retained as the third-release compatibility path.  Both route builders use
+retained for compatibility.  Both route builders use
 only an explicit inference-visible query mask; actor replay consumes the
 serialized route and therefore cannot accidentally inspect assistant answers.
 """
@@ -310,7 +310,7 @@ class DARTMergeRoute:
 
 @dataclass(frozen=True)
 class HoliTomDPCSpatialMergeRoute:
-    """Replayable DPC clustering route for the sixth-release spatial merge.
+    """Replayable DPC clustering route for spatial merging.
 
     ``assignment[i]`` is the output-cluster slot receiving source token ``i``;
     ``center_indices`` are strictly increasing, so both output embeddings and
@@ -467,7 +467,7 @@ class HoliTomDPCSpatialMergeRoute:
         return route
 
 
-# Canonical fourth-release name.  The serialized schema intentionally remains
+# CDPruner name.  The serialized schema remains
 # identical so existing rollout/replay code can consume new CDPruner routes.
 CDPrunerRoute = DARTMergeRoute
 
@@ -618,7 +618,7 @@ def validate_cdpruner_curriculum_route(
 
 
 def _exact_holitom_dpc_budget(num_tokens: int) -> int:
-    """Return the immutable sixth-release per-image merge budget."""
+    """Return the fixed per-image merge budget."""
 
     if num_tokens <= 0:
         raise ValueError("num_tokens must be positive")
@@ -626,7 +626,7 @@ def _exact_holitom_dpc_budget(num_tokens: int) -> int:
 
 
 def _scaled_euclidean_block(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
-    """Compute the formal FP32 Euclidean/sqrt(D) distance for one block."""
+    """Compute the FP32 Euclidean/sqrt(D) distance for one block."""
 
     if left.ndim != 2 or right.ndim != 2 or left.shape[-1] != right.shape[-1]:
         raise ValueError("distance operands must be rank-2 with a shared hidden dimension")
@@ -655,7 +655,7 @@ def _dpc_density_and_delta(
     The largest persistent tensors are ``O(N*k)`` and ``O(N)``.  A pairwise
     distance block is released before the next block, so an ``N x N`` matrix is
     never retained.  KNN includes the source token itself, exactly matching the
-    formal ``k=min(7, N)`` contract.
+    ``k=min(7, N)`` rule.
     """
 
     if features.ndim != 2 or features.shape[0] <= 0 or features.shape[1] <= 0:
@@ -771,7 +771,7 @@ def build_holitom_dpc_spatial_merge_route(
     image_coordinates: torch.Tensor,
     distance_chunk_tokens: int = 256,
 ) -> HoliTomDPCSpatialMergeRoute:
-    """Build the exact sixth-release HoliTom-inspired DPC merge route."""
+    """Build the HoliTom-inspired DPC merge route."""
 
     if image_embeds.ndim != 2 or image_embeds.shape[0] <= 0 or image_embeds.shape[1] <= 0:
         raise ValueError("image_embeds must be a non-empty [tokens, hidden] tensor")
@@ -1179,7 +1179,7 @@ def prune_image_embeds(image_embeds: torch.Tensor, route: DARTMergeRoute) -> tor
 
 
 def merge_image_embeds(image_embeds: torch.Tensor, route: DARTMergeRoute) -> torch.Tensor:
-    """Third-release compatibility name for :func:`prune_image_embeds`."""
+    """Legacy compatibility name for :func:`prune_image_embeds`."""
 
     return prune_image_embeds(image_embeds, route)
 
@@ -1401,7 +1401,7 @@ class VisionCDPrunerCompressor(nn.Module):
 
 
 class VisionDARTMergeCompressor(nn.Module):
-    """Third-release fixed-quota conditional-diversity compatibility path."""
+    """Legacy fixed-quota conditional-diversity path."""
 
     algorithm = LEGACY_CONDITIONAL_DIVERSITY_ALGORITHM
 
@@ -1453,7 +1453,7 @@ def build_vision_token_compressor(
     """Instantiate the configured visual token compressor.
 
     In particular, a ``qwen35_cdpruner_v1`` checkpoint can never be silently
-    reconstructed with the third-release selector.  Legacy construction is
+    reconstructed with the legacy selector.  Legacy construction is
     available only when its legacy algorithm identifier is explicit.
     """
 
@@ -1489,7 +1489,7 @@ def build_vision_token_compressor(
             or not isinstance(distance_chunk_tokens, Integral)
             or int(distance_chunk_tokens) != 256
         ):
-            raise ValueError("Formal HoliTom DPC distance_chunk_tokens is fixed at 256")
+            raise ValueError("HoliTom DPC distance_chunk_tokens is fixed at 256")
         boolean_contract = {
             "query_conditioned": False,
             "attention_conditioned": False,
@@ -1615,7 +1615,7 @@ def build_vision_token_compressor(
             candidate_multiplier=int(config.get("candidate_multiplier", 4)),
         )
     if algorithm == LEGACY_CONDITIONAL_DIVERSITY_ALGORITHM:
-        raise ValueError("The legacy conditional-diversity selector is disabled for this v4 load path")
+        raise ValueError("The legacy conditional-diversity selector is not supported by this loader")
     raise ValueError(f"Unsupported vision token compressor algorithm: {algorithm!r}")
 
 

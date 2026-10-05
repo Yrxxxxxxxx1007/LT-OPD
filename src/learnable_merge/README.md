@@ -8,24 +8,14 @@ The MLP uses selected rows from a pretrained projection for its input layer and 
 
 ## Setup
 
-Use the environment in the repository's [setup instructions](../../README.md#setup). From the repository root, select this implementation explicitly:
-
-```bash
-export PYTHONPATH="$PWD/src/learnable_merge:$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
-```
-
-The command below installs the same package, including shared data and evaluation tools. It requires the full repository checkout:
-
-```bash
-pip install -e 'src/learnable_merge[train,eval]'
-```
+Follow the repository's [setup instructions](../../README.md#setup) and run the commands below from the repository root. Both implementations share one installation; `--implementation current` selects this version.
 
 ## Training
 
 Training uses a frozen full-token teacher, on-policy JSD, and a visual-token curriculum. The data directory should contain `train.parquet` and its images:
 
 ```bash
-python -m training.train \
+lt-opd --implementation current train \
   --model /path/to/Qwen3.5-4B \
   --data-dir /path/to/prepared-data \
   --user-root /path/to/user-storage \
@@ -46,10 +36,11 @@ hf download yyy051007/LT-OPD \
 ```python
 import torch
 from evaluation.runtime import build_route_query
-from training.runtime import load_compression_runtime
+from lt_opd import load_compression_runtime
 
 runtime = load_compression_runtime(
     "models/LT-OPD",
+    implementation="current",
     torch_dtype=torch.bfloat16,
     device_map={"": "cuda:0"},
 )
@@ -71,10 +62,10 @@ print(output["decoded_predictions"][0])
 ## Export and Evaluation
 
 ```bash
-python -m training.export \
+lt-opd --implementation current export \
   --checkpoint /path/to/checkpoint \
   --base-model /path/to/Qwen3.5-4B \
   --output /path/to/export
 ```
 
-With the `PYTHONPATH` above, the existing [evaluation commands](../evaluation/README.md) use this runtime and the compressor configuration saved with the model.
+The shared [evaluation commands](../evaluation/README.md) select the runtime from the compression configuration saved with the model.

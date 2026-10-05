@@ -237,5 +237,5 @@ trainer:
   group_name: LT-OPD
 ray_kwargs:
   ray_init:
-    num_cpus: 32
+    num_cpus: null
     include_dashboard: false

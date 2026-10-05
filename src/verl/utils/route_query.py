@@ -1,4 +1,4 @@
-"""Strict, auditable route-query extraction for conditional visual pruning.
+"""Route-query extraction for conditional visual pruning.
 
 The visual-token router may inspect only the semantic multiple-choice query:
 the question stem and the four answer options.  Prompt boilerplate, response

@@ -63,8 +63,8 @@ class TrainingBatchPlan:
         if remainder and not self.drop_last:
             # DataProto.split retains its final partial chunk.  A partial outer
             # batch therefore still performs one optimizer update when the
-            # configured mini-batch equals the full outer batch (the V6
-            # contract), while more general plans use the exact ceiling.
+            # configured mini-batch equals the full outer batch, while
+            # more general plans use the exact ceiling.
             steps += math.ceil(remainder / self.ppo_mini_batch_size)
         return steps
 

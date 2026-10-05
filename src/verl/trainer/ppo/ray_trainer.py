@@ -2417,7 +2417,7 @@ class RayPPOTrainer:
         if not bool(rollout.get("hf_rollout_group_balance", False)):
             return repeated_prompts, None, {}
         if rollout.name != "hf" or not bool(rollout.get("hf_use_replicated_module", False)):
-            raise RuntimeError("Formal rollout UID balancing requires the independent HF replica")
+            raise RuntimeError("Rollout UID balancing requires the independent HF replica")
         rollout_n = int(rollout.n)
         if rollout_n <= 0 or len(repeated_prompts) % rollout_n:
             raise RuntimeError("Rollout UID balancing received an invalid n-way batch")
@@ -2777,7 +2777,7 @@ class RayPPOTrainer:
                 curriculum_config = compressor_config.get("curriculum")
                 if curriculum_config is not None:
                     if self.async_rollout_mode:
-                        raise RuntimeError("formal visual-token curriculum requires synchronous rollout")
+                        raise RuntimeError("visual-token curriculum requires synchronous rollout")
                     from omegaconf import OmegaConf
 
                     from verl.models.transformers.visual_token_curriculum import (

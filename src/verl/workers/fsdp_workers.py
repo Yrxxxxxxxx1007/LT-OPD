@@ -686,13 +686,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 invalid_reasons.append("vision_token_compressor must be enabled")
             if full_parameter_actor:
                 if apply_lora or int(self.config.model.get("lora_rank", 0)) != 0:
-                    invalid_reasons.append("the formal full-parameter replica forbids LoRA")
+                    invalid_reasons.append("the full-parameter replica forbids LoRA")
                 if compressor_config.get("algorithm") not in {
                     "qwen35_holitom_dpc_spatial_merge_v1",
                     "qwen35_cdpruner_v1",
                 }:
                     invalid_reasons.append(
-                        "the formal full-parameter replica requires audited HoliTom-DPC or CDPruner"
+                        "the full-parameter replica requires HoliTom-DPC or CDPruner"
                     )
                 if not bool(self.config.rollout.get("hf_replica_cpu_offload_between_phases", False)):
                     invalid_reasons.append("the full-parameter replica must be parked on CPU during actor update")
@@ -718,7 +718,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 invalid_reasons.append("activation offload must be disabled")
             if invalid_reasons:
                 raise ValueError(
-                    "hf_use_replicated_module violates its audited HF rollout contract: " + "; ".join(invalid_reasons)
+                    "hf_use_replicated_module has an incompatible HF rollout configuration: " + "; ".join(invalid_reasons)
                 )
         if use_tiled_mlp and self.config.actor.strategy == "fsdp":
             raise ValueError("TiledMLP requires FSDP2. Set `actor_rollout_ref.actor.strategy=fsdp2`.")
@@ -768,7 +768,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if enable_gradient_checkpointing or enable_activation_offload:
                 teacher_errors.append("gradient checkpointing and activation offload must be disabled")
             if teacher_errors:
-                raise ValueError("Invalid formal fixed-teacher contract: " + "; ".join(teacher_errors))
+                raise ValueError("Invalid fixed-teacher configuration: " + "; ".join(teacher_errors))
         attn_implementation = override_model_config.get("attn_implementation", "flash_attention_2")
         actor_model_config = AutoConfig.from_pretrained(
             local_path, trust_remote_code=trust_remote_code, attn_implementation=attn_implementation
@@ -1038,9 +1038,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             actor_module.requires_grad_(True)
             vision_tower = get_vl_model_vision_tower(actor_module)
             if vision_tower is None:
-                raise RuntimeError("Full-parameter V6 requires a Qwen vision tower")
+                raise RuntimeError("Full-parameter training requires a Qwen vision tower")
             if not _native_visual_merger_parameters(actor_module):
-                raise RuntimeError("Full-parameter V6 requires the native Qwen visual.merger")
+                raise RuntimeError("Full-parameter training requires the native Qwen visual.merger")
             for name, parameter in actor_module.named_parameters(remove_duplicate=True):
                 if not parameter.is_floating_point():
                     raise TypeError(f"Full-parameter model parameter is not floating point: {name}={parameter.dtype}")
@@ -1085,7 +1085,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if use_replicated_hf_rollout:
             if full_parameter_actor:
                 if hasattr(actor_module, "peft_config"):
-                    raise RuntimeError("Formal full-parameter rollout replication forbids a PEFT wrapper")
+                    raise RuntimeError("Full-parameter rollout replication forbids a PEFT wrapper")
                 hf_rollout_replica = _clone_hf_rollout_replica(actor_module, dtype=torch.bfloat16)
             else:
                 if not hasattr(actor_module, "peft_config") or "default" not in actor_module.peft_config:
@@ -1205,7 +1205,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     )
                 )
                 if non_bf16:
-                    raise TypeError(f"Formal rollout replica has non-BF16 parameters: {non_bf16[:20]}")
+                    raise TypeError(f"Rollout replica has non-BF16 parameters: {non_bf16[:20]}")
             if any((parameter.requires_grad for parameter in hf_rollout_replica.parameters())):
                 raise RuntimeError("GPU HF rollout replica unexpectedly contains trainable parameters")
             self.hf_rollout_replica = hf_rollout_replica
@@ -1737,7 +1737,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     elif teacher_model_source == "fixed":
                         if self.config.actor.get("training_mode", "legacy") == "full_parameter":
                             raise RuntimeError(
-                                "Formal V6 requires fixed_teacher_uses_ref_slot=True; refusing a duplicate ref+teacher model"
+                                "Full-parameter training requires fixed_teacher_uses_ref_slot=True to avoid a duplicate teacher model"
                             )
                         teacher_model_path = self_distillation_cfg.get("teacher_model_path")
                         if self.rank == 0:

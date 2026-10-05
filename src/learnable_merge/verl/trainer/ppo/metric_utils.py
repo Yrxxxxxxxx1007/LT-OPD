@@ -262,10 +262,8 @@ def compute_data_metrics(
             np.mean(statuses == "valid")
         )
 
-    # Preserve the global dashboard while making the former 77%/5% failure
-    # modes attributable to their actual task/source buckets.  Only bounded
-    # release-owned categorical fields are admitted; sample IDs are never
-    # turned into metric keys.
+    # Report metrics by task and source using bounded categorical fields.
+    # Sample IDs are never turned into metric keys.
     non_tensors = batch.non_tensor_batch or {}
     response_lengths_np = response_length.detach().cpu().numpy()
     for field, namespace in (

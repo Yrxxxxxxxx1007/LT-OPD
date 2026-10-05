@@ -107,17 +107,17 @@ def run_ppo(config, task_runner_class=None) -> None:
 
 
 def _require_declared_v6_fixed_teacher_ref_slot(actor_config, *, derived_value: bool) -> None:
-    """Formal V6 must declare teacher placement instead of inheriting a runtime default."""
+    """Require explicit teacher placement for full-parameter training."""
 
     if actor_config.get("training_mode", "legacy") != "full_parameter":
         return
     self_distillation = actor_config.get("self_distillation", {})
     if self_distillation.get("fixed_teacher_uses_ref_slot") is not True:
         raise ValueError(
-            "Formal V6 requires explicit self_distillation.fixed_teacher_uses_ref_slot=True"
+            "Full-parameter training requires explicit self_distillation.fixed_teacher_uses_ref_slot=True"
         )
     if derived_value is not True:
-        raise ValueError("Formal V6 fixed teacher cannot occupy the ref slot under the active KL/ref policy")
+        raise ValueError("The fixed teacher cannot occupy the ref slot under the active KL/ref policy")
 
 
 class TaskRunner:

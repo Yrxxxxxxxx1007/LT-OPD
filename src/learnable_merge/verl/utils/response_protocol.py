@@ -1,6 +1,6 @@
 """Single-answer transport helpers shared by rollout, logging, and evaluation.
 
-Release V8 places the opening ``<answer>`` delimiter in the assistant prefill.
+The response protocol places the opening ``<answer>`` delimiter in the assistant prefill.
 It is therefore context, not a sampled action.  Any consumer that presents or
 scores the assistant response must reconstruct that transport prefix exactly
 once before applying the strict whole-response protocol.

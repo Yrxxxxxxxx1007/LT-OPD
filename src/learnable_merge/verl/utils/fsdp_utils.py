@@ -141,7 +141,7 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
 
     # Add a leaf policy for LoRA adapter projections.  This must remain active
     # even when transformer blocks are also auto-wrapped: the frozen base is
-    # BF16 while audited LoRA master parameters are FP32, and FSDP1 refuses to
+    # BF16 while LoRA master parameters are FP32, and FSDP1 refuses to
     # flatten both dtypes into one FlatParameter.  Wrapping the trainable
     # lora_A/lora_B leaves first gives them independent FP32 handles; the
     # transformer policy may then wrap the remaining BF16 block parameters.

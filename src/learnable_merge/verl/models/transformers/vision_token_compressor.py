@@ -131,10 +131,10 @@ class DARTMergeRoute:
     curriculum_schedule_sha256: Optional[str] = None
     summary_anchor_index: Optional[int] = None
     summary_source_indices: Optional[torch.Tensor] = None
-    # Fixed-summary weights in V10; detached cosine baseline priors in V11.
+    # Fixed-summary weights, or detached cosine priors for learnable summaries.
     # Learned alpha is recomputed from current differentiable features/head.
     summary_weights: Optional[torch.Tensor] = None
-    # V12 maps every original node exactly once to a retained output slot.
+    # Map each original node exactly once to a retained output slot.
     # merge_prior_weights holds detached discarded-only priors, never learned
     # signed residual weights; retained-anchor priors are exactly zero.
     merge_assignment: Optional[torch.Tensor] = None
@@ -482,7 +482,7 @@ class DARTMergeRoute:
 
 @dataclass(frozen=True)
 class HoliTomDPCSpatialMergeRoute:
-    """Replayable DPC clustering route for the sixth-release spatial merge.
+    """Replayable DPC clustering route for spatial merging.
 
     ``assignment[i]`` is the output-cluster slot receiving source token ``i``;
     ``center_indices`` are strictly increasing, so both output embeddings and
@@ -677,7 +677,7 @@ class HoliTomDPCSpatialMergeRoute:
         return route
 
 
-# Canonical fourth-release name.  The serialized schema intentionally remains
+# CDPruner name.  The serialized schema remains
 # identical so existing rollout/replay code can consume new CDPruner routes.
 CDPrunerRoute = DARTMergeRoute
 
@@ -882,7 +882,7 @@ def _exact_holitom_dpc_budget(num_tokens: int, retention_bps: int = 500) -> int:
 
 
 def _scaled_euclidean_block(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
-    """Compute the formal FP32 Euclidean/sqrt(D) distance for one block."""
+    """Compute the FP32 Euclidean/sqrt(D) distance for one block."""
 
     if left.ndim != 2 or right.ndim != 2 or left.shape[-1] != right.shape[-1]:
         raise ValueError("distance operands must be rank-2 with a shared hidden dimension")
@@ -911,7 +911,7 @@ def _dpc_density_and_delta(
     The largest persistent tensors are ``O(N*k)`` and ``O(N)``.  A pairwise
     distance block is released before the next block, so an ``N x N`` matrix is
     never retained.  KNN includes the source token itself, exactly matching the
-    formal ``k=min(7, N)`` contract.
+    ``k=min(7, N)`` rule.
     """
 
     if features.ndim != 2 or features.shape[0] <= 0 or features.shape[1] <= 0:
@@ -1030,7 +1030,7 @@ def build_holitom_dpc_spatial_merge_route(
     curriculum_completed_steps: Optional[int] = None,
     curriculum_schedule_sha256: Optional[str] = None,
 ) -> HoliTomDPCSpatialMergeRoute:
-    """Build the exact sixth-release HoliTom-inspired DPC merge route."""
+    """Build the HoliTom-inspired DPC merge route."""
 
     if image_embeds.ndim != 2 or image_embeds.shape[0] <= 0 or image_embeds.shape[1] <= 0:
         raise ValueError("image_embeds must be a non-empty [tokens, hidden] tensor")
@@ -1967,7 +1967,7 @@ def summarize_discarded_image_embeds(
 ) -> torch.Tensor:
     """Keep CDPruner's original embeddings and replace only its extra anchor slot.
 
-    Routing and the cosine prior are detached. A V11 head recomputes alpha
+    Routing and the cosine prior are detached. The learnable head recomputes alpha
     from the current sources and current parameters on every actor forward;
     alpha never enters route serialization. The FP32 weighted sum propagates
     gradients to every source and the head before casting back at output.
@@ -2006,7 +2006,7 @@ def summarize_discarded_image_embeds(
 
 
 def merge_image_embeds(image_embeds: torch.Tensor, route: DARTMergeRoute) -> torch.Tensor:
-    """Third-release compatibility name for :func:`prune_image_embeds`."""
+    """Legacy compatibility name for :func:`prune_image_embeds`."""
 
     return prune_image_embeds(image_embeds, route)
 
@@ -2365,7 +2365,7 @@ class VisionCDPrunerCompressor(nn.Module):
 
 
 class VisionDARTMergeCompressor(nn.Module):
-    """Third-release fixed-quota conditional-diversity compatibility path."""
+    """Legacy fixed-quota conditional-diversity path."""
 
     algorithm = LEGACY_CONDITIONAL_DIVERSITY_ALGORITHM
 
@@ -2418,7 +2418,7 @@ def build_vision_token_compressor(
     """Instantiate the configured visual token compressor.
 
     In particular, a ``qwen35_cdpruner_v1`` checkpoint can never be silently
-    reconstructed with the third-release selector.  Legacy construction is
+    reconstructed with the legacy selector.  Legacy construction is
     available only when its legacy algorithm identifier is explicit.
     """
 
@@ -2605,7 +2605,7 @@ def build_vision_token_compressor(
             candidate_multiplier=int(config.get("candidate_multiplier", 4)),
         )
     if algorithm == LEGACY_CONDITIONAL_DIVERSITY_ALGORITHM:
-        raise ValueError("The legacy conditional-diversity selector is disabled for this v4 load path")
+        raise ValueError("The legacy conditional-diversity selector is not supported by this loader")
     raise ValueError(f"Unsupported vision token compressor algorithm: {algorithm!r}")
 
 

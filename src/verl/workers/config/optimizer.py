@@ -37,8 +37,8 @@ class OptimizerConfig(BaseConfig):
             once per outer rollout batch. Disabled by default for backward
             compatibility.
         lr_warmup_update_indexing (str): Versioned mapping from scheduler
-            indices to optimizer updates. The V7 full-parameter recipe uses
-            ``one_based_nonzero_v2`` so its first real update is non-zero.
+            indices to optimizer updates. Use ``one_based_nonzero_v2``
+            for a non-zero learning rate on the first update.
         vision_lr (Optional[float]): Full-parameter visual-tower learning rate.
         merger_lr (Optional[float]): Full-parameter native visual-merger learning rate.
         eps (float): Adam-family numerical-stability epsilon.

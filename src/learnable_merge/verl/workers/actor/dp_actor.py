@@ -256,15 +256,15 @@ class DataParallelPPOActor(BasePPOActor):
             teacher_regularization = getattr(self_distillation_cfg, "teacher_regularization", None)
             update_rate = float(getattr(self_distillation_cfg, "teacher_update_rate", -1.0))
             if teacher_model_source != "fixed" or teacher_regularization != "fixed" or update_rate != 0.0:
-                raise RuntimeError("Formal V6 forbids EMA/current/progressive teacher updates")
+                raise RuntimeError("Full-parameter training requires a fixed teacher; EMA/current/progressive updates are unsupported")
             if self.teacher_module is None or self.teacher_module is self.actor_module:
-                raise RuntimeError("Formal V6 requires a separate fixed dense teacher module")
+                raise RuntimeError("Full-parameter training requires a separate fixed dense teacher module")
             if self.teacher_module.training:
-                raise RuntimeError("Formal fixed teacher left eval mode")
+                raise RuntimeError("Fixed teacher left eval mode")
             if any(parameter.requires_grad for parameter in self.teacher_module.parameters()):
-                raise RuntimeError("Formal fixed teacher contains a trainable parameter")
+                raise RuntimeError("Fixed teacher contains a trainable parameter")
             if self.teacher_update_count != 0:
-                raise RuntimeError("Formal fixed teacher update_count must remain zero")
+                raise RuntimeError("Fixed teacher update_count must remain zero")
             return
         if teacher_model_source != "legacy":
             return
@@ -384,13 +384,13 @@ class DataParallelPPOActor(BasePPOActor):
         """Run the immutable dense teacher with a rank-synchronous small batch."""
 
         if self.config.get("training_mode", "legacy") != "full_parameter":
-            raise RuntimeError("Fixed-teacher chunking is restricted to the formal full-parameter path")
+            raise RuntimeError("Fixed-teacher chunking is restricted to the full-parameter path")
         if isinstance(micro_batch_size, bool) or not isinstance(micro_batch_size, int) or micro_batch_size <= 0:
             raise ValueError("teacher micro_batch_size must be a positive integer")
         if module is None or module is self.actor_module:
-            raise RuntimeError("Formal fixed teacher must be separate from the current actor")
+            raise RuntimeError("Fixed teacher must be separate from the current actor")
         if module.training or any(parameter.requires_grad for parameter in module.parameters()):
-            raise RuntimeError("Formal fixed teacher must remain frozen in eval mode")
+            raise RuntimeError("Fixed teacher must remain frozen in eval mode")
         responses = teacher_inputs.get("responses")
         if not isinstance(responses, torch.Tensor) or responses.ndim == 0:
             raise ValueError("Teacher chunking requires batch-aligned responses")
@@ -601,7 +601,7 @@ class DataParallelPPOActor(BasePPOActor):
         if algorithm in {CDPRUNER_ALGORITHM, LEGACY_CONDITIONAL_DIVERSITY_ALGORITHM}:
             return "dart_merge_routes"
         raise RuntimeError(
-            "Formal composite packing requires a supported live visual compressor, "
+            "Composite packing requires a supported live visual compressor, "
             f"got compressor algorithm={algorithm!r}"
         )
 
@@ -774,12 +774,12 @@ class DataParallelPPOActor(BasePPOActor):
         normalized_uids = None
         if expected_algorithm == "qwen35_cdpruner_v1":
             if sample_uids is None:
-                raise RuntimeError("V8 CDPruner actor replay requires sample-aligned rollout UIDs")
+                raise RuntimeError("CDPruner actor replay requires sample-aligned rollout UIDs")
             if hasattr(sample_uids, "tolist"):
                 sample_uids = sample_uids.tolist()
             normalized_uids = [str(value) for value in sample_uids]
             if len(normalized_uids) != input_ids.shape[0] or any(not value for value in normalized_uids):
-                raise RuntimeError("V8 CDPruner actor replay UIDs are missing or not sample aligned")
+                raise RuntimeError("CDPruner actor replay UIDs are missing or not sample aligned")
         prompt_width = int(input_ids.shape[-1]) - int(response_length)
         if prompt_width <= 0:
             raise ValueError("DART replay has no public prompt prefix")
@@ -987,7 +987,7 @@ class DataParallelPPOActor(BasePPOActor):
         if (return_all_logps or use_topk) and self.use_fused_kernels:
             raise ValueError("Logit distillation requires disabling fused kernels.")
         if union_support and self.use_remove_padding:
-            raise ValueError("Union distillation support is audited only with use_remove_padding=False")
+            raise ValueError("Union distillation support requires use_remove_padding=False")
 
         model = module or self.actor_module
         compressor_enabled = self._visual_token_compression_enabled(model)
@@ -1025,7 +1025,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         merge_visual_tokens = visual_compression_mode == "merge"
         if visual_compression_mode == "no_image":
-            # Keep the exact public token/placeholder stream for the formal
+            # Keep the exact public token/placeholder stream for the
             # no-image ablation, but never forward retained pixel metadata.
             # Policy: same_prompt_image_placeholder_without_visual_replacement_v1.
             multi_modal_inputs = {}
@@ -1680,7 +1680,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                 if self._visual_token_compressor_algorithm(score_model) == CDPRUNER_ALGORITHM:
                     if "uid" not in data.non_tensor_batch:
-                        raise RuntimeError("V8 CDPruner scoring requires sample-aligned rollout UIDs")
+                        raise RuntimeError("CDPruner scoring requires sample-aligned rollout UIDs")
                     non_tensor_select_keys.append("uid")
         if self.use_prefix_grouper:
             select_keys += [k for k in ["prompts", "response_mask"] if k in data.batch]
@@ -1810,7 +1810,7 @@ class DataParallelPPOActor(BasePPOActor):
 
             if self._visual_token_compressor_algorithm(self.actor_module) == CDPRUNER_ALGORITHM:
                 if "uid" not in data.non_tensor_batch:
-                    raise RuntimeError("V8 CDPruner update requires sample-aligned rollout UIDs")
+                    raise RuntimeError("CDPruner update requires sample-aligned rollout UIDs")
                 non_tensor_select_keys.append("uid")
         elif self.use_prefix_grouper and "uid" in data.non_tensor_batch.keys():
             non_tensor_select_keys.append("uid")
@@ -2007,7 +2007,6 @@ class DataParallelPPOActor(BasePPOActor):
                     if self_distillation_enabled:
                         student_forward_time = time.perf_counter() - student_forward_start
                         stage_wall_time_totals["timing_s/update_actor/student_forward"] += student_forward_time
-                    # V8_FULL_LOGIT_VOPD_AUXILIARY_BRANCH_RELEASE_V1
                     # Full-distribution JSD differentiates the top-k/full-logit
                     # branch. Token log-probabilities only form detached IS
                     # weights here. Drop their unused CE autograd branch before

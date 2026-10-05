@@ -126,7 +126,7 @@ def align_qwen35_chat_generation_config(
     (``<|endoftext|>``), while the tokenizer/chat template terminates an
     assistant turn with ``<|im_end|>``.  Generation must stop on either token;
     otherwise a completed answer can continue into another turn until the
-    length cap.  Only the formal Qwen3.5 path opts into the fail-closed
+    length cap.  Only the Qwen3.5 path opts into the
     ``required`` mode so unrelated models retain their upstream behavior.
     """
 
@@ -135,7 +135,7 @@ def align_qwen35_chat_generation_config(
     if not required:
         return generation_config
     if generation_config is None:
-        raise ValueError("Formal Qwen3.5 rollout requires a generation config")
+        raise ValueError("Qwen3.5 rollout requires a generation config")
 
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
     pad_token_id = getattr(tokenizer, "pad_token_id", None)
@@ -151,7 +151,7 @@ def align_qwen35_chat_generation_config(
         or pad_token != "<|endoftext|>"
     ):
         raise ValueError(
-            "Formal Qwen3.5 requires tokenizer EOS=<|im_end|> and "
+            "Qwen3.5 requires tokenizer EOS=<|im_end|> and "
             "PAD=<|endoftext|> with distinct integer ids"
         )
 

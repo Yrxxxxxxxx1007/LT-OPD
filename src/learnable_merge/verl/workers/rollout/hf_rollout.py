@@ -256,7 +256,7 @@ class HFRollout(BaseRollout):
         # transports raw chat objects plus signed capacity metadata; image
         # preprocessing happens inside ``_generate_minibatch`` *after* this
         # packer.  Requiring ``multi_modal_inputs`` here therefore rejects every
-        # valid raw-prompt formal batch before decode.  Use the materialized
+        # valid raw-prompt batch before decode.  Use the materialized
         # per-profile cost in that path -- the same binding used by the
         # controller's cross-rank group balancer -- without preprocessing an
         # image twice or changing row order.
@@ -380,9 +380,8 @@ class HFRollout(BaseRollout):
     def _left_pad_dart_outputs(self, outputs: list[DataProto]) -> list[DataProto]:
         """Pad DART decode chunks to the global batch's real maximum prompt.
 
-        Padding every prompt to the configured safety limit (8192 in the smoke
-        contract) made the HF backend perform thousands of useless masked-token
-        operations.  Completed chunks are left-padded only as much as
+        Padding every prompt to the configured length limit adds unnecessary
+        masked-token operations.  Completed chunks are left-padded only as much as
         DataProto concatenation requires.  Responses remain at the fixed right
         edge, preserving the actor's response-start convention.
         """
@@ -809,7 +808,7 @@ class HFRollout(BaseRollout):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Generate with one compressed prefill followed by cached token decode.
 
-        FSDP-backed ranks execute the same number of model calls.  The audited
+        FSDP-backed ranks execute the same number of model calls.  The
         native rollout replica contains no distributed forward collectives, so
         it stops at the local batch EOS and avoids a scalar all-reduce plus
         dummy cache forward on every generated token.
@@ -1599,7 +1598,7 @@ class HFRollout(BaseRollout):
         multi_modal_inputs_list = []
         # ``DataProto.repeat(..., interleave=True)`` keeps the same Python
         # prompt object for the n trajectories belonging to one rollout uid.
-        # Qwen image preprocessing is deterministic for the formal single-image
+        # Qwen image preprocessing is deterministic for the single-image
         # path, and repeating it materializes n identical (potentially very
         # large) CPU pixel tensors.  Cache only when both the immutable rollout
         # uid and the exact Python prompt object match.  If transport ever
@@ -1616,7 +1615,7 @@ class HFRollout(BaseRollout):
         if self._uses_cdpruner() and (
             rollout_uids is None or len(rollout_uids) != len(raw_prompts)
         ):
-            raise RuntimeError("V8 CDPruner requires one immutable rollout UID per prompt")
+            raise RuntimeError("CDPruner requires one immutable rollout UID per prompt")
         deterministic_preprocess_cache: dict[tuple[str, int], tuple[str, object]] = {}
 
         raw_prompt_count = len(raw_prompts)
@@ -1979,7 +1978,7 @@ class HFRollout(BaseRollout):
         semantic_stop_criteria = None
         if semantic_stop_enabled:
             if self.config.get("semantic_stop_string", "</answer>") != "</answer>":
-                raise ValueError("V7 semantic stop is pinned to the exact '</answer>' delimiter")
+                raise ValueError("Semantic stop is pinned to the exact '</answer>' delimiter")
             semantic_stop_criteria = WellFormedAnswerTagCriteria(
                 self.tokenizer,
                 prompt_width=prompt_length,
@@ -2001,7 +2000,7 @@ class HFRollout(BaseRollout):
         holitom_dpc_merge = self._uses_holitom_dpc_spatial_merge()
         visual_compression_mode = prompts.meta_info.get("visual_compression_mode")
         if visual_compression_mode is None:
-            # Preserve legacy DART rollout behavior.  Formal V6 callers may
+            # Preserve legacy DART rollout behavior.  Callers may
             # select dense/no_image explicitly through per-request meta_info.
             visual_compression_mode = (
                 "merge"
@@ -2017,7 +2016,7 @@ class HFRollout(BaseRollout):
             if not compressor_enabled:
                 raise RuntimeError("HF merge rollout requires an enabled visual compressor")
             if holitom_dpc_merge and not multi_modal_inputs:
-                raise RuntimeError("Formal HoliTom-DPC merge rollout requires non-empty multimodal inputs")
+                raise RuntimeError("HoliTom-DPC merge rollout requires non-empty multimodal inputs")
         elif visual_compression_mode == "dense":
             if not multi_modal_inputs:
                 raise RuntimeError("HF dense rollout requires non-empty multimodal inputs")
@@ -2160,12 +2159,8 @@ class HFRollout(BaseRollout):
                     generation_config=generation_config,
                     output_scores=False,
                     return_dict_in_generate=True,
-                    # Dense/no-image are ordinary uncompressed Qwen decode
-                    # paths.  Recomputing the full visual/text prefix at every
-                    # token makes the 1,500-row four-view gate quadratic and
-                    # needlessly reruns the vision tower.  Keep the standard
-                    # KV cache; fresh-process functional-mode parity audits
-                    # verify the cached implementation before GPU release.
+                    # Dense/no-image use ordinary Qwen decoding. Keep the KV
+                    # cache to avoid recomputing the visual/text prefix.
                     use_cache=True,
                     stopping_criteria=stopping_criteria,
                     **functional_mode_kwargs,
@@ -2262,7 +2257,7 @@ class HFRollout(BaseRollout):
         # nothing to the live KV cache.  The owning FSDP worker applies the
         # hf_preserve_cuda_cache policy once at the rollout/training boundary,
         # after all chunk outputs have been moved to CPU.  This keeps fast cache
-        # reuse between chunks while still allowing M7 to release rollout-only
+        # reuse between chunks while releasing rollout-only
         # allocator blocks before the full-parameter actor update.
 
         # The ordinary HF path shares the actor module and restores its train
@@ -2284,7 +2279,7 @@ class HFRollout(BaseRollout):
             if bool(self.config.get("semantic_stop_virtual_open", False)):
                 prefix = str(self.config.get("semantic_stop_transport_prefix", ""))
                 if prefix != "<answer>":
-                    raise RuntimeError("V8 virtual-open rollout lost its exact transport prefix")
+                    raise RuntimeError("Virtual-open rollout lost its exact transport prefix")
                 output_non_tensors["rollout_response_transport_prefix"] = np.asarray(
                     [prefix] * generated_batch_size, dtype=object
                 )

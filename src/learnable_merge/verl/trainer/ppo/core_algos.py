@@ -1168,7 +1168,7 @@ def compute_self_distillation_loss(
                 # These diagnostics expose how much probability lies outside
                 # the explicit student/teacher/rollout union support. They do
                 # not alter the loss and make the top-k-plus-tail approximation
-                # auditable without another full-vocabulary forward.
+                # measurable without another full-vocabulary forward.
                 student_tail_probability = student_distill_log_probs[..., -1].detach().exp()
                 teacher_tail_probability = teacher_distill_log_probs[..., -1].detach().exp()
             else:
