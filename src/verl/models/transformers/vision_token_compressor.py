@@ -548,6 +548,8 @@ def _exact_cdpruner_budget(num_tokens: int, retention_bps: int = 500) -> int:
 def validate_cdpruner_curriculum_route(
     route: DARTMergeRoute,
     runtime_state: Mapping[str, Any],
+    *,
+    curriculum=None,
 ) -> int:
     """Validate one V2 route against the sole active optimizer-step state.
 
@@ -565,7 +567,10 @@ def validate_cdpruner_curriculum_route(
         visual_token_budget,
     )
 
-    schedule = VisualTokenCurriculum()
+    schedule = (
+        VisualTokenCurriculum() if curriculum is None else
+        VisualTokenCurriculum.from_mapping(curriculum) if isinstance(curriculum, Mapping) else curriculum
+    )
     required = set(schedule.runtime_state(0))
     if set(runtime_state) != required:
         raise ValueError(
@@ -1387,7 +1392,7 @@ class VisionCDPrunerCompressor(nn.Module):
             )
             if self.curriculum is not None:
                 state = self.curriculum.runtime_state(int(curriculum_completed_steps))
-                validate_cdpruner_curriculum_route(route, state)
+                validate_cdpruner_curriculum_route(route, state, curriculum=self.curriculum)
             else:
                 expected = _exact_cdpruner_budget(
                     route.original_tokens, retention_bps=retention_bps

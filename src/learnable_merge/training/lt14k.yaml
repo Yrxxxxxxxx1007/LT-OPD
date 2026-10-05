@@ -1,0 +1,12 @@
+data:
+  vqa20k_mixture: lt14k
+actor_rollout_ref:
+  model:
+    vision_token_compressor:
+      curriculum:
+        total_optimizer_steps: 175
+  actor:
+    optim:
+      total_training_steps: 175
+trainer:
+  total_training_steps: 175

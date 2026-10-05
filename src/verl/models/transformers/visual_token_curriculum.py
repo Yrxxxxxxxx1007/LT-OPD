@@ -66,7 +66,7 @@ def _canonical_sha256(value: Any) -> str:
 
 @dataclass(frozen=True)
 class VisualTokenCurriculum:
-    """Immutable 25% -> 5% retention schedule over 175 updates."""
+    """The 25% -> 5% token-retention curve with an optional longer final plateau."""
 
     schema_version: str = CURRICULUM_SCHEMA_VERSION
     driver: str = CURRICULUM_DRIVER
@@ -102,8 +102,8 @@ class VisualTokenCurriculum:
             minimum=0,
         )
         _require_int(self.minimum_tokens_per_image, name="minimum_tokens_per_image", minimum=1)
-        if (total, start, final, warmup, plateau) != (175, 2500, 500, 14, 100):
-            raise ValueError("The token curriculum is defined for 175 updates: 14 at 25%, cosine decay to step 100, then 5%.")
+        if total < 175 or (start, final, warmup, plateau) != (2500, 500, 14, 100):
+            raise ValueError("The token curriculum requires at least 175 updates: 14 at 25%, cosine decay to step 100, then 5%.")
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "VisualTokenCurriculum":
         if not isinstance(value, Mapping):
@@ -137,6 +137,8 @@ class VisualTokenCurriculum:
                 "completed_optimizer_steps is outside the training horizon: "
                 f"completed={completed}, total={self.total_optimizer_steps}"
             )
+        if completed >= len(RETENTION_BPS_BY_COMPLETED_STEP):
+            return self.final_retention_bps
         return RETENTION_BPS_BY_COMPLETED_STEP[completed]
 
     def stage_index(self, completed_optimizer_steps: int) -> int:

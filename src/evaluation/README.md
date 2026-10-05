@@ -27,10 +27,10 @@ python src/evaluation/prepare_data.py --output data/benchmarks \
 pip install -e '.[eval]'
 lt-opd eval \
   --export-dir outputs/lt-opd/export --data-config data/benchmarks/datasets.json \
-  --output-dir results/lt-opd --gpus 0,1,2,3
+  --output-dir results/lt-opd
 ```
 
-The exported model selects its runtime automatically. Without `--gpus`, evaluation uses `CUDA_VISIBLE_DEVICES`; explicit indices refer to that visible list when it is set.
+Set `--export-dir` to either version's export directory; the model selects its runtime automatically. Without `--gpus`, evaluation uses `CUDA_VISIBLE_DEVICES`, or GPU 0 if unset. Explicit indices refer to the visible list when it is set.
 
 Select a subset with `--datasets mmmu textvqa`. `--workers-per-gpu 2` increases concurrency when memory permits. Batch sizes remain 1 for the five visual/MCQ tasks and 4 for GQA, POPE, TextVQA, and MME. Existing predictions are resumed; use a separate output directory for each model.
 

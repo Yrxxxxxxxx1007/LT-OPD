@@ -13,17 +13,31 @@ def build_config(model, data_dir, output, resume=False, gpus=None, nodes=None, c
     with initialize_config_dir(config_dir=str(Path(verl.__file__).parent/'trainer/config'), version_base=None):
         config = compose(config_name='vopd')
     OmegaConf.set_struct(config, False)
-    config = OmegaConf.merge(config, OmegaConf.load(root/'v8.yaml'))
+    config = OmegaConf.merge(config, {'trainer': {'max_steps': None}}, OmegaConf.load(root/'v8.yaml'))
+    saved = None
+    if resume:
+        saved_path = Path(output).expanduser().resolve()/'config.yaml'
+        if not saved_path.is_file():
+            raise FileNotFoundError(f'--resume requires the saved recipe: {saved_path}')
+        saved = OmegaConf.load(saved_path)
+        for name, value in (('model', model), ('data', data_dir)):
+            if Path(saved.paths[name]).expanduser().resolve() != Path(value).expanduser().resolve():
+                raise ValueError(f'--resume requires the saved {name} path: {saved.paths[name]}')
+        config = OmegaConf.merge(config, saved)
+        config.trainer.max_steps = None
     if config_path is not None:
         config = OmegaConf.merge(config, OmegaConf.load(Path(config_path).expanduser().resolve()))
-    config.paths = {'model': str(Path(model).resolve()), 'data': str(Path(data_dir).resolve()),
-                    'output': str(Path(output).resolve()), 'training': str(root)}
+    config.paths = {'model': str(Path(model).expanduser().resolve()), 'data': str(Path(data_dir).expanduser().resolve()),
+                    'output': str(Path(output).expanduser().resolve()), 'training': str(root)}
     config.trainer.resume_mode = 'auto' if resume else 'disable'
     if gpus is not None:
         config.trainer.n_gpus_per_node = gpus
     if nodes is not None:
         config.trainer.nnodes = nodes
     OmegaConf.resolve(config)
+    if saved is not None:
+        from training.runtime_settings import validate_resume_settings
+        validate_resume_settings(saved, config)
     return config
 
 
@@ -57,17 +71,26 @@ def main():
     parser.add_argument('--gpus', type=int, help='GPUs per node; defaults to the recipe')
     parser.add_argument('--nodes', type=int, help='Number of nodes; defaults to the recipe')
     parser.add_argument('--cpus', type=int, help='Local Ray CPU allocation; defaults to available resources')
+    parser.add_argument('--max-steps', type=int, help='Stop at this training step while retaining the full recipe schedule')
     parser.add_argument('--resume', action='store_true')
     args = parser.parse_args()
     config = build_config(args.model, args.data_dir, args.output, args.resume, args.gpus, args.nodes, args.config)
+    if args.max_steps is not None:
+        config.trainer.max_steps = args.max_steps
+    from training.runtime_settings import prepare_resume, validate_local_gpus, validate_max_steps
+    validate_max_steps(config.trainer.max_steps)
+    args.data_dir, args.output = (Path(config.paths.data), Path(config.paths.output))
     from verl.utils.config import validate_config
     validate_config(config, use_reference_policy=True, use_critic=False)
     if not (args.data_dir/'train.parquet').is_file():
         raise FileNotFoundError(args.data_dir/'train.parquet')
+    if args.resume:
+        prepare_resume(config)
     if not args.resume and (args.output/'checkpoints/latest_checkpointed_iteration.txt').exists():
         raise FileExistsError('Output contains a checkpoint. Use --resume or a new output directory.')
     args.output.mkdir(parents=True, exist_ok=True)
     import ray
+    validate_local_gpus(config, ray_initialized=ray.is_initialized())
     configure_runtime(config, cpus=args.cpus, ray_initialized=ray.is_initialized())
     from omegaconf import OmegaConf
     OmegaConf.save(config, args.output/'config.yaml')

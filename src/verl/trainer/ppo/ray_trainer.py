@@ -2705,9 +2705,16 @@ class RayPPOTrainer:
         # load checkpoint before doing anything
         loaded_step = self._load_checkpoint()
 
-        if loaded_step >= self.total_training_steps:
+        stop_step = self.total_training_steps
+        max_steps = self.config.trainer.get("max_steps")
+        if max_steps is not None:
+            if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
+                raise ValueError("trainer.max_steps must be a positive integer")
+            stop_step = min(stop_step, max_steps)
+
+        if loaded_step >= stop_step:
             print(
-                f"Checkpoint step {loaded_step} already reaches total_training_steps={self.total_training_steps}; "
+                f"Checkpoint step {loaded_step} already reaches the requested stop step {stop_step}; "
                 "exiting without an unintended extra update."
             )
             return
@@ -2729,7 +2736,7 @@ class RayPPOTrainer:
             rollout_skip.wrap_generate_sequences()
 
         # add tqdm
-        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+        progress_bar = tqdm(total=stop_step, initial=self.global_steps, desc="Training Progress")
 
         # we start from step 1
         self.global_steps += 1
@@ -2832,7 +2839,7 @@ class RayPPOTrainer:
                 )
                 metrics.update(rollout_balance_metrics)
 
-                is_last_step = self.global_steps >= self.total_training_steps
+                is_last_step = self.global_steps >= stop_step
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
@@ -2947,7 +2954,7 @@ class RayPPOTrainer:
                                     raise RuntimeError(
                                         "visual-token curriculum has no active CDPruner runtime state"
                                     )
-                                validate_cdpruner_curriculum_route(route, curriculum_state)
+                                validate_cdpruner_curriculum_route(route, curriculum_state, curriculum=curriculum)
                             else:
                                 expected = min(
                                     route.original_tokens,

@@ -12,17 +12,23 @@ Follow the repository's [setup instructions](../../README.md#setup) and run the 
 
 ## Training
 
-Training uses a frozen full-token teacher, on-policy JSD, and a visual-token curriculum. The data directory should contain `train.parquet` and its images:
+Training uses a frozen full-token teacher, on-policy JSD, and a visual-token curriculum. Prepare [LT-OPD-14K](../../README.md#data) and download the base model as shown in the [training instructions](../../README.md#training). The configuration below uses the public 14K dataset; the default 15K recipe remains available for a matching dataset.
 
 ```bash
+USER_STORAGE=/path/to/user-storage
+RUN_DIR="$USER_STORAGE/outputs/lt-opd-current"
+
 lt-opd --implementation current train \
-  --model /path/to/Qwen3.5-4B \
-  --data-dir /path/to/prepared-data \
-  --user-root /path/to/user-storage \
-  --output /path/to/user-storage/outputs/lt-opd
+  --config src/learnable_merge/training/lt14k.yaml \
+  --model models/Qwen3.5-4B \
+  --data-dir data/LT-OPD-14K \
+  --user-root "$USER_STORAGE" \
+  --output "$RUN_DIR"
 ```
 
-Use `--resume` to continue a saved run. Persistent outputs and runtime caches stay under `--user-root`.
+Use `--gpus` or `CUDA_VISIBLE_DEVICES` to select GPUs, and `--cpus` to set the local Ray CPU allocation. Use `--resume` to continue a saved run.
+
+Persistent outputs and caches stay under `--user-root`. Ray's temporary object store uses `/dev/shm` by default; `--ram-object-store-dir` can select a directory under `--user-root` when shared memory is limited.
 
 ## Inference
 
@@ -63,9 +69,10 @@ print(output["decoded_predictions"][0])
 
 ```bash
 lt-opd --implementation current export \
-  --checkpoint /path/to/checkpoint \
-  --base-model /path/to/Qwen3.5-4B \
-  --output /path/to/export
+  --checkpoint "$RUN_DIR/checkpoints/global_step_175" \
+  --recipe "$RUN_DIR/config.yaml" \
+  --base-model models/Qwen3.5-4B \
+  --output "$RUN_DIR/export"
 ```
 
-The shared [evaluation commands](../evaluation/README.md) select the runtime from the compression configuration saved with the model.
+Follow the shared [evaluation commands](../evaluation/README.md) with `--export-dir "$RUN_DIR/export"`; they select the runtime from the model's saved compression configuration.
