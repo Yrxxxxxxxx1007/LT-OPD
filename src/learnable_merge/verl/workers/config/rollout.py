@@ -140,10 +140,8 @@ class RolloutConfig(BaseConfig):
     prompt_length: int = 512
     response_length: int = 512
 
-    # Maximum number of DART prompts decoded together by the legacy HF
-    # backend on each data-parallel rank.  One preserves the audited baseline;
-    # larger values are opt-in because they change the sampling RNG layout and
-    # require compact left padding after visual compression.
+    # Prompts decoded together on each data-parallel rank. Larger batches change
+    # the sampling RNG layout and require left padding after compression.
     hf_dart_decode_batch_size: int = 1
 
     dtype: str = "bfloat16"
@@ -264,16 +262,13 @@ class RolloutConfig(BaseConfig):
     projector_aware: bool = False
     dart_merge_aware: bool = False
 
-    # Response-protocol stop used by the V7 HF rollout.  It is deliberately
-    # more specific than token EOS: only a non-empty, well-formed answer block
-    # in the generated suffix is accepted, and the closing delimiter remains
-    # part of the sampled action sequence.
+    # Stop after a complete non-empty answer block, retaining the closing
+    # delimiter in the sampled action sequence.
     semantic_stop_enabled: bool = False
     semantic_stop_string: str = "</answer>"
     semantic_stop_include_tokens: bool = True
     semantic_stop_scan_response_only: bool = True
-    # V8 owns ``<answer>`` in the assistant prompt.  Only generated suffix
-    # tokens are actions; presentation/evaluation reconstructs this prefix.
+    # When the prompt supplies ``<answer>``, only the generated suffix is an action.
     semantic_stop_virtual_open: bool = False
     semantic_stop_transport_prefix: str = ""
 

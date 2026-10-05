@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lt-opd"
-version = "0.1.0"
+version = "0.3.0"
 description = "On-policy distillation for visual token compression"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -66,19 +66,26 @@ eval = [
 [project.urls]
 Repository = "https://github.com/Yrxxxxxxxx1007/LT-OPD"
 Dataset = "https://huggingface.co/datasets/yyy051007/LT-OPD-14K"
+Paper = "https://arxiv.org/abs/2609.32353"
+Model = "https://huggingface.co/yyy051007/LT-OPD"
 
 [project.scripts]
-lt-opd-train = "training.train:main"
-lt-opd-export = "training.export:main"
-lt-opd-data = "data.prepare:main"
-lt-opd-eval = "evaluation.run:main"
-lt-opd-score = "evaluation.score:main"
+lt-opd = "lt_opd.cli:main"
+lt-opd-train = "lt_opd.cli:train"
+lt-opd-export = "lt_opd.cli:export"
+lt-opd-data = "lt_opd.cli:data"
+lt-opd-eval = "lt_opd.cli:evaluate"
+lt-opd-score = "lt_opd.cli:score"
+lt-opd-merge-train = "lt_opd.cli:merge_train"
+lt-opd-merge-export = "lt_opd.cli:merge_export"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["verl*", "training*", "evaluation*", "data*"]
+include = ["lt_opd*", "verl*", "training*", "evaluation*", "data*", "learnable_merge.training*", "learnable_merge.verl*"]
 
 [tool.setuptools.package-data]
 training = ["*.yaml", "*.json", "*.jinja"]
 evaluation = ["*.json"]
 verl = ["py.typed", "version/version", "trainer/runtime_env.yaml", "trainer/config/**/*.yaml", "trainer/config/*.yaml"]
+"learnable_merge.training" = ["*.yaml", "*.json", "*.jinja", "*.sh"]
+"learnable_merge.verl" = ["py.typed", "version/version", "trainer/runtime_env.yaml", "trainer/config/**/*.yaml", "trainer/config/*.yaml"]

@@ -18,7 +18,7 @@ tokenizer_path: null
 # Explicit minimum image pixels passed to every actor/teacher/data processor.
 processor_min_pixels: null
 
-# Probe-selected immutable maximum image pixels passed to every processor.
+# Maximum image pixels passed to each processor.
 processor_max_pixels: null
 
 # whether to use shared memory for model loading
@@ -97,10 +97,8 @@ vision_token_projector:
   # hidden expansion ratio for the projector MLP
   mlp_ratio: 2.0
 
-# Sixth-release HoliTom-inspired, parameter-free spatial DPC merge after the
-# native Qwen merger.  Legacy V4 launchers must explicitly override every
-# CDPruner field they consume; keeping those fields null here prevents a V6
-# compose from silently carrying conditional-pruning semantics into DPC.
+# Visual-token compression after the native Qwen merger. Method-specific
+# fields are supplied by the selected recipe.
 vision_token_compressor:
 
   enabled: False
@@ -155,7 +153,7 @@ vision_token_compressor:
 
   persistent_n_by_n_matrix_forbidden: True
 
-  # Conditional-pruning-only fields are intentionally null in V6.
+  # Fields used by conditional pruning.
   kernel_jitter: null
 
   relevance_epsilon: null
@@ -184,8 +182,7 @@ vision_token_compressor:
   # Versioned data manifest whose content hashes are checkpointed and verified.
   data_manifest_path: null
 
-  # Explicit incompatible materialized-data schema. Null preserves archived
-  # release-04 behavior; formal release 06 binds its VQA20K manifest schema.
+  # Optional schema for prepared training data.
   data_manifest_schema: null
 
 # Legacy: train only native merger beside LoRA. Full-parameter: explicitly include it with language+ViT.

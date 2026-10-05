@@ -14,8 +14,7 @@ rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
 # fsdp, fsdp2 or megatron. must be set.
 strategy: ???
 
-# Explicit trainability contract. "legacy" preserves archived LoRA/freeze recipes;
-# the formal V6 recipe opts in to "full_parameter".
+# Use "full_parameter" to train the full model instead of the LoRA/frozen path.
 training_mode: legacy
 
 # Split each sample into sub-batches of this size for PPO
@@ -44,7 +43,7 @@ vision_packing:
   # Per-rank cost ceiling selected by the hardware profiling ladder.
   max_cost_per_gpu: null
 
-  # Strict actor trajectories per micro-batch selected by the V6 fine profile ladder.
+  # Maximum trajectories per actor micro-batch.
   max_trajectories_per_microbatch: null
 
   # VOPD union-support plus target-logit dense-teacher forwards.
@@ -321,12 +320,10 @@ optim:
   # Prioritized. None, 0 or Negative values mean delegating to lr_warmup_steps_ratio.
   lr_warmup_steps: -1
 
-  # Keep the historical outer-batch scheduler behavior unless an audited
-  # recipe explicitly accounts for every optimizer mini-batch.
+  # Advance the scheduler after each optimizer update rather than each outer batch.
   lr_scheduler_step_per_optimizer_step: False
 
-  # Versioned warmup semantics. Legacy recipes keep a zero-LR first update;
-  # the V7 recipe opts into one_based_nonzero_v2 explicitly.
+  # Use one_based_nonzero_v2 for a non-zero learning rate on the first update.
   lr_warmup_update_indexing: zero_based_legacy_v1
 
   # Independent group for the pretrained Qwen3.5 visual.merger.

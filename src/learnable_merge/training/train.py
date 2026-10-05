@@ -4,10 +4,16 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import stat
 from contextlib import contextmanager
 from pathlib import Path
+
+from training.runtime_settings import (
+    bytes_from_gib,
+    select_resources,
+    validate_batch_layout,
+    validate_store_capacity,
+)
 
 
 def private_ram_log_root(value):
@@ -32,7 +38,7 @@ def private_ram_log_root(value):
     return directory
 
 
-def build_config(model, data_dir, output, resume=False, gpus=None, nodes=1, config_path=None):
+def build_config(model, data_dir, output, resume=False, gpus=None, nodes=None, config_path=None):
     from hydra import compose, initialize_config_dir
     from omegaconf import OmegaConf
     import verl
@@ -40,14 +46,24 @@ def build_config(model, data_dir, output, resume=False, gpus=None, nodes=1, conf
     with initialize_config_dir(config_dir=str(Path(verl.__file__).parent/'trainer/config'), version_base=None):
         config = compose(config_name='vopd')
     OmegaConf.set_struct(config, False)
-    recipe = Path(config_path).resolve() if config_path else root/'v12.yaml'
-    config = OmegaConf.merge(config, OmegaConf.load(recipe))
+    recipe = Path(config_path).resolve() if config_path else root/'default.yaml'
+    if recipe == root/'v12.yaml' and not recipe.exists():
+        recipe = root/'default.yaml'
+    config = OmegaConf.merge(
+        config,
+        {'runtime_resources': {'memory_headroom_gib': 16, 'omp_threads': None}},
+        OmegaConf.load(recipe),
+    )
     config.paths = {'model': str(Path(model).resolve()), 'data': str(Path(data_dir).resolve()),
                     'output': str(Path(output).resolve()), 'training': str(root)}
     config.trainer.resume_mode = 'auto' if resume else 'disable'
     if gpus is not None:
         config.trainer.n_gpus_per_node = gpus
-    config.trainer.nnodes = nodes
+    elif config.trainer.get('n_gpus_per_node') is None:
+        import torch
+        config.trainer.n_gpus_per_node = torch.cuda.device_count()
+    if nodes is not None:
+        config.trainer.nnodes = nodes
     OmegaConf.resolve(config)
     return config
 
@@ -91,30 +107,35 @@ def configure_runtime(config, *, output, user_root, ram_object_store_dir=None):
     # artifacts remain under user_root; never silently mmap the shared filesystem.
     plasma = (Path(ram_object_store_dir).resolve() if ram_object_store_dir
               else Path('/dev/shm')/user_root.name/f'ltopd-{run_id}')
+    cpus, object_bytes, omp_threads = select_resources(config, plasma)
     env = {key: str(value) for key, value in directories.items()}
+    python_path = str(Path(__file__).resolve().parents[1])
+    if os.environ.get('PYTHONPATH'):
+        python_path += os.pathsep + os.environ['PYTHONPATH']
     env.update({
-        'OMP_NUM_THREADS': '4', 'TOKENIZERS_PARALLELISM': 'false',
+        'OMP_NUM_THREADS': str(omp_threads), 'TOKENIZERS_PARALLELISM': 'false',
         'NCCL_DEBUG': 'WARN', 'TORCH_NCCL_ASYNC_ERROR_HANDLING': '1', 'NCCL_RAS_ENABLE': '0',
         'PYTHONUNBUFFERED': '1', 'PYTHONDONTWRITEBYTECODE': '1',
         'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
-        'PYTHONPATH': str(Path(__file__).resolve().parents[1]),
+        'PYTHONPATH': python_path,
         'VERL_FILE_LOGGER_PATH': str(logs/'metrics.jsonl'),
         'VERL_FILE_LOGGER_APPEND': '1', 'VERL_RUN_ATTEMPT': '1',
     })
     os.environ.update(env)
     config.ray_kwargs.ray_init.update({
-        'num_cpus': 32, 'num_gpus': int(config.trainer.n_gpus_per_node),
-        'object_store_memory': 64 * 1024**3, 'include_dashboard': False,
+        'num_cpus': cpus, 'num_gpus': int(config.trainer.n_gpus_per_node),
+        'object_store_memory': object_bytes, 'include_dashboard': False,
         '_temp_dir': str(ray_root), '_plasma_directory': str(plasma),
         'object_spilling_directory': str(spill), 'runtime_env': {'env_vars': env},
     })
     return plasma
 
 
-def prepare_ram_store(directory, user_root):
+def prepare_ram_store(directory, user_root, *, object_bytes, headroom):
     """Create only an explicitly requested private ephemeral tmpfs namespace."""
     import stat
     directory = Path(directory).resolve()
+    validate_store_capacity(directory, object_bytes, headroom)
     if directory.is_relative_to(Path(user_root).resolve()):
         directory.mkdir(parents=True, exist_ok=True)
         return
@@ -126,25 +147,6 @@ def prepare_ram_store(directory, user_root):
         for fields in (line.split() for line in Path('/proc/mounts').read_text().splitlines())
     ):
         raise RuntimeError('The default object store requires a RAM-backed /dev/shm tmpfs mount')
-    if shutil.disk_usage(shm).free < 96 * 1024**3:
-        raise RuntimeError('The 64 GiB RAM object store requires at least 96 GiB available in /dev/shm')
-    cgroup = Path('/sys/fs/cgroup')
-    if (cgroup/'memory.max').is_file():
-        raw_limit = (cgroup/'memory.max').read_text().strip()
-        limit = None if raw_limit == 'max' else int(raw_limit)
-        usage = int((cgroup/'memory.current').read_text())
-        stats = dict(line.split() for line in (cgroup/'memory.stat').read_text().splitlines())
-        reclaimable = int(stats.get('inactive_file', 0))
-    elif (cgroup/'memory/memory.limit_in_bytes').is_file():
-        cgroup = cgroup/'memory'
-        limit = int((cgroup/'memory.limit_in_bytes').read_text())
-        usage = int((cgroup/'memory.usage_in_bytes').read_text())
-        stats = dict(line.split() for line in (cgroup/'memory.stat').read_text().splitlines())
-        reclaimable = int(stats.get('total_inactive_file', stats.get('inactive_file', 0)))
-    else:
-        limit, usage, reclaimable = None, 0, 0
-    if limit is not None and max(0, limit - usage) + min(usage, reclaimable) < 80 * 1024**3:
-        raise RuntimeError('The RAM object store requires 64 GiB plus 16 GiB of instance memory headroom')
     current = shm
     for part in directory.relative_to(shm).parts:
         current = current/part
@@ -192,9 +194,13 @@ def main():
     parser.add_argument('--model', required=True, help='Local Qwen3.5-4B directory')
     parser.add_argument('--data-dir', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
-    parser.add_argument('--config', type=Path, default=Path(__file__).with_name('v12.yaml'))
-    parser.add_argument('--gpus', type=int, help='GPUs per node; defaults to the selected recipe')
-    parser.add_argument('--nodes', type=int, default=1)
+    parser.add_argument('--config', type=Path, default=Path(__file__).with_name('default.yaml'))
+    parser.add_argument('--gpus', type=int, help='Number of visible GPUs to use; defaults to the recipe or all visible GPUs')
+    parser.add_argument('--nodes', type=int, help='Number of nodes (the local launcher supports one)')
+    parser.add_argument('--cpus', type=int, help='Ray CPU allocation; defaults to available resources')
+    parser.add_argument('--object-store-gib', type=float, help='Ray object-store size in GiB')
+    parser.add_argument('--memory-headroom-gib', type=float, help='Memory reserved outside the Ray object store')
+    parser.add_argument('--omp-threads', type=int, help='CPU threads per worker; respects OMP_NUM_THREADS by default')
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--user-root', type=Path, required=True)
     parser.add_argument('--ram-object-store-dir', type=Path,
@@ -202,14 +208,26 @@ def main():
     parser.add_argument('--prepare-only', action='store_true', help='Write configuration without starting Ray or training')
     args = parser.parse_args()
     config = build_config(args.model, args.data_dir, args.output, args.resume, args.gpus, args.nodes, args.config)
-    if config.data.get('vqa20k_mixture') == 'lt15k' and (config.trainer.n_gpus_per_node, args.nodes) != (4, 1):
-        raise ValueError('The LT-15K batch plan requires the GPU layout specified in the default recipe')
+    if args.cpus is not None:
+        config.ray_kwargs.ray_init.num_cpus = args.cpus
+    if args.object_store_gib is not None:
+        config.ray_kwargs.ray_init.object_store_memory = bytes_from_gib(args.object_store_gib, '--object-store-gib')
+    if args.memory_headroom_gib is not None:
+        config.runtime_resources.memory_headroom_gib = args.memory_headroom_gib
+    if args.omp_threads is not None:
+        config.runtime_resources.omp_threads = args.omp_threads
+    validate_batch_layout(config)
     from verl.utils.config import validate_config
     validate_config(config, use_reference_policy=True, use_critic=False)
     if not (args.data_dir/'train.parquet').is_file():
         raise FileNotFoundError(args.data_dir/'train.parquet')
     if not args.resume and (args.output/'checkpoints/latest_checkpointed_iteration.txt').exists():
         raise FileExistsError('Output contains a checkpoint. Use --resume or a new output directory.')
+    if not args.prepare_only:
+        import torch
+        visible_gpus = torch.cuda.device_count()
+        if int(config.trainer.n_gpus_per_node) > visible_gpus:
+            raise ValueError(f'Requested {config.trainer.n_gpus_per_node} GPUs but only {visible_gpus} are visible.')
     plasma = configure_runtime(config, output=args.output, user_root=args.user_root,
                                ram_object_store_dir=args.ram_object_store_dir)
     from omegaconf import OmegaConf
@@ -218,7 +236,11 @@ def main():
         print(json.dumps({'status': 'prepared_not_started', 'config': str((args.output/'config.yaml').resolve()),
                           'gpus': config.trainer.n_gpus_per_node, 'training_steps': config.trainer.total_training_steps}))
         return
-    prepare_ram_store(plasma, args.user_root)
+    prepare_ram_store(
+        plasma, args.user_root,
+        object_bytes=int(config.ray_kwargs.ray_init.object_store_memory),
+        headroom=bytes_from_gib(config.runtime_resources.memory_headroom_gib, 'memory_headroom_gib', allow_zero=True),
+    )
     from verl.trainer.main_ppo import run_ppo
     with short_ray_session(config.ray_kwargs.ray_init._temp_dir):
         run_ppo(config)

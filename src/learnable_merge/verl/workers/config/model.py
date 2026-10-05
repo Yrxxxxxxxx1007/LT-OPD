@@ -110,9 +110,7 @@ class HFModelConfig(BaseConfig):
         default_factory=lambda: {"enabled": False, "num_tokens": 64, "mlp_ratio": 2.0}
     )
 
-    # Sixth-release parameter-free spatial DPC merge defaults.  The compressor
-    # remains disabled until a launcher opts in.  Archived CDPruner launchers
-    # explicitly override their complete legacy contract.
+    # Compression is disabled by default; each recipe supplies its method settings.
     vision_token_compressor: dict = field(
         default_factory=lambda: {
             "enabled": False,

@@ -236,12 +236,12 @@ custom_reward_function:
   name: compute_score
 trainer:
   project_name: LT-OPD
-  experiment_name: v12_cdpruner_learnable_merge_15k
+  experiment_name: lt-opd
   logger:
   - console
   - file
   use_legacy_worker_impl: enable
-  n_gpus_per_node: 4
+  n_gpus_per_node: null
   nnodes: 1
   total_training_steps: 188
   total_epochs: 1
@@ -256,5 +256,9 @@ trainer:
   group_name: LT-OPD
 ray_kwargs:
   ray_init:
-    num_cpus: 32
+    num_cpus: null
+    object_store_memory: null
     include_dashboard: false
+runtime_resources:
+  memory_headroom_gib: 16
+  omp_threads: null

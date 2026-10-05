@@ -37,9 +37,8 @@ class OptimizerConfig(BaseConfig):
             scheduler after each successful optimizer mini-batch instead of
             once per outer rollout batch. Disabled by default for backward
             compatibility.
-        lr_warmup_update_indexing (str): Versioned mapping from scheduler
-            indices to optimizer updates. The V7 full-parameter recipe uses
-            ``one_based_nonzero_v2`` so its first real update is non-zero.
+        lr_warmup_update_indexing (str): Mapping from scheduler indices to optimizer
+            updates. ``one_based_nonzero_v2`` starts with a non-zero learning rate.
         vision_lr (Optional[float]): Full-parameter visual-tower learning rate.
         merger_lr (Optional[float]): Full-parameter native visual-merger learning rate.
         summary_lr (Optional[float]): Learnable discarded-summary head learning rate.

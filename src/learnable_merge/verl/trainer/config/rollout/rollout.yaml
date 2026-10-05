@@ -38,8 +38,7 @@ projector_aware: False
 # Enable only after the strict HF/vLLM DART-Merge parity gate passes.
 dart_merge_aware: False
 
-# Boolean-only admission is forbidden.  These fields describe the exact route,
-# M-RoPE and weight-epoch boundary and remain empty for the formal HF backend.
+# Route, M-RoPE and weight-version settings for compatible DPC backends.
 dpc_aware_impl_id: ""
 dpc_route_authority: ""
 dpc_route_schema_version: ""
@@ -48,16 +47,14 @@ dpc_group_sticky_by_uid: False
 dpc_gpu_parity_artifact: ""
 
 # Use a frozen per-rank HF rollout replica while retaining the original FSDP
-# actor for training and checkpointing.  Production enables this explicitly
-# only for the audited LoRA+DART recipe.
+# actor for training and checkpointing. Enabled explicitly by compatible recipes.
 hf_use_replicated_module: False
 
 # Full-parameter recipes may park the frozen BF16 rollout replica on CPU while
 # the FP32 FSDP actor performs its update.
 hf_replica_cpu_offload_between_phases: False
 
-# Replica-only exact cached-decode optimizations.  They are disabled by
-# default and enabled together by the audited V6 M7P profile.
+# Optional cached-decoding optimizations for replicated rollout models.
 hf_active_sequence_compaction: False
 hf_share_rollout_prefix: False
 hf_rollout_group_balance: False
@@ -73,15 +70,12 @@ gpu_memory_utilization: 0.5
 # Whether to ignore EOS and continue generating after EOS is hit.
 ignore_eos: False
 
-# Optional per-row task-protocol stop. V7 enables the exact answer closing
-# delimiter while retaining its sampled tokens and carrying an explicit action
-# mask; legacy recipes remain EOS-only.
+# Optional answer-block stopping that retains sampled delimiter tokens.
 semantic_stop_enabled: False
 semantic_stop_string: "</answer>"
 semantic_stop_include_tokens: True
 semantic_stop_scan_response_only: True
-# V8 may own the opening delimiter in the assistant prompt.  Defaults keep
-# every legacy recipe on the historical sampled-opening protocol.
+# Enable when the assistant prompt already contains the opening delimiter.
 semantic_stop_virtual_open: False
 semantic_stop_transport_prefix: ""
 

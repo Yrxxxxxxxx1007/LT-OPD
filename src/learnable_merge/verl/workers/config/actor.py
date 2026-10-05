@@ -74,7 +74,7 @@ class SelfDistillationConfig(BaseConfig):
             the legacy teacher processor path.
         fixed_teacher_uses_ref_slot (bool): Runtime-derived worker placement flag.  The task runner
             overwrites this value; users must not rely on it as a method hyperparameter.
-        teacher_visual_compression_mode (str): Fixed-teacher visual path. Formal V6 permits only ``dense``.
+        teacher_visual_compression_mode (str): Visual-token mode for the frozen teacher.
         fallback_to_policy_loss_on_missing_teacher (bool): When teacher_always_on=True, fall back to vanilla
             policy loss for samples whose teacher_image_key column is empty.
         log_prob_dump_dir (Optional[str]): Optional directory used to dump student/teacher log-prob tensors for each step.
@@ -303,9 +303,7 @@ class ActorConfig(BaseConfig):
     }
 
     strategy: str = MISSING
-    # ``legacy`` preserves all existing LoRA/freeze recipes.  The formal V6
-    # path must opt in explicitly so relaxing those old hard gates cannot
-    # silently change an archived experiment.
+    # Select LoRA/frozen-backbone or full-parameter training explicitly.
     training_mode: str = "legacy"
     ppo_mini_batch_size: int = 256
     ppo_micro_batch_size: Optional[int] = None  # deprecate
