@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from importlib.metadata import PackageNotFoundError, version
+import json
 import os
 from pathlib import Path
 import runpy
@@ -16,6 +17,27 @@ MODULES = {
     "eval": "evaluation.run",
     "score": "evaluation.score",
 }
+
+
+def _implementation_for_export(export_dir):
+    """Choose the runtime from the compressor saved with an exported model."""
+    export_dir = Path(export_dir)
+    for name in ("visual_compression_config.json", "cdpruner_config.json", "config.json"):
+        path = export_dir / name
+        if not path.is_file():
+            continue
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(settings, dict):
+            raise ValueError(f"Invalid model configuration in {path}")
+        compressor = settings.get("vision_token_compressor", {})
+        if not isinstance(compressor, dict):
+            raise ValueError(f"Invalid vision_token_compressor in {path}")
+        for key in ("learnable_merge", "summary"):
+            component = compressor.get(key) or {}
+            if isinstance(component, dict) and component.get("enabled") is True:
+                return "current"
+        return "legacy"
+    return "legacy"
 
 
 def _select(implementation):
@@ -35,7 +57,11 @@ def _select(implementation):
 
 
 def _run(command, implementation, arguments):
-    _select(implementation)
+    if command == "eval":
+        selected = ["--implementation", implementation]
+        arguments = [*selected, *arguments] if implementation == "auto" else [*arguments, *selected]
+    else:
+        _select("legacy" if implementation == "auto" else implementation)
     sys.argv = [f"lt-opd {command}", *arguments]
     runpy.run_module(MODULES[command], run_name="__main__")
 
@@ -53,8 +79,8 @@ def main():
     except PackageNotFoundError:
         release = "source"
     parser.add_argument("--version", action="version", version=f"%(prog)s {release}")
-    parser.add_argument("--implementation", choices=("legacy", "current"), default="legacy",
-                        help="Implementation to use (default: legacy)")
+    parser.add_argument("--implementation", choices=("auto", "legacy", "current"), default="auto",
+                        help="Auto selects the exported model for evaluation and legacy for other commands")
     parser.add_argument("command", choices=tuple(MODULES))
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -74,7 +100,7 @@ def data():
 
 
 def evaluate():
-    _run("eval", "legacy", sys.argv[1:])
+    _run("eval", "auto", sys.argv[1:])
 
 
 def score():

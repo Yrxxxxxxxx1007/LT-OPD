@@ -19,7 +19,7 @@
 
 #### 🔥🔥🔥 News
 
-- **2026-09-25:** The trained checkpoints of [newest verstion](src/learnable_merge) of LT-OPD is released. The scores are higher, 82.3-><strong>84.5%</strong> of the full-token model!  
+- **2026-10-05:** The trained checkpoints of [newest verstion](src/learnable_merge) of LT-OPD is released. The scores are higher, 82.3-><strong>84.5%</strong> of the full-token model!  
 - **2026-09-25:** This repo (code and data) is released.
 
 ---
@@ -49,10 +49,7 @@ src/
 ├── data/          # LT-OPD-14K preparation
 └── evaluation/    # Benchmark inference and scoring
 ```
-If you want to use the codes, please:  
-```bash
-cd src
-```  
+Run the commands below from the repository root.
 
 
 ## Setup

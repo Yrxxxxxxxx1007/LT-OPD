@@ -14,7 +14,7 @@ Use the environment in the repository's [setup instructions](../../README.md#set
 export PYTHONPATH="$PWD/src/learnable_merge:$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-For an independent installation, this directory also provides a `pyproject.toml`:
+The command below installs the same package, including shared data and evaluation tools. It requires the full repository checkout:
 
 ```bash
 pip install -e 'src/learnable_merge[train,eval]'

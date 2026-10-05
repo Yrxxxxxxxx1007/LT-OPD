@@ -16,7 +16,7 @@ Inference uses the exported Qwen3.5 CDPruner runtime at 5% retention, with a min
 
 ## Data and inference
 
-Prepare the benchmark data and create `data/benchmarks/datasets.json`:
+Run these commands from the repository root. Prepare the benchmark data and create `data/benchmarks/datasets.json`:
 
 ```bash
 python src/evaluation/prepare_data.py --output data/benchmarks \
@@ -29,6 +29,8 @@ python src/evaluation/run.py \
   --export-dir outputs/lt-opd/export --data-config data/benchmarks/datasets.json \
   --output-dir results/lt-opd --gpus 0,1,2,3
 ```
+
+The exported model selects its runtime automatically. Without `--gpus`, evaluation uses `CUDA_VISIBLE_DEVICES`; explicit indices refer to that visible list when it is set.
 
 Select a subset with `--datasets mmmu textvqa`. `--workers-per-gpu 2` increases concurrency when memory permits. Batch sizes remain 1 for the five visual/MCQ tasks and 4 for GQA, POPE, TextVQA, and MME. Existing predictions are resumed; use a separate output directory for each model.
 
