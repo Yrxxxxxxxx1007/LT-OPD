@@ -1,0 +1,19 @@
+LT-OPD
+
+This distribution includes modified training components from verl and SDPO,
+and CDPruner and HoliTom-inspired DPC implementations for Qwen3.5. Original copyright notices are
+retained in the source files.
+
+verl: https://github.com/volcengine/verl (Apache-2.0)
+SDPO: https://github.com/lasgroup/SDPO (Apache-2.0)
+CDPruner: https://github.com/Theia-4869/CDPruner (Apache-2.0)
+HoliTom: https://github.com/cokeshao/HoliTom (Apache-2.0)
+Transformers: https://github.com/huggingface/transformers (Apache-2.0)
+
+Benchmark scorers are obtained from their original repositories at the
+revisions recorded in src/evaluation/sources.json. Their original licenses
+and attribution apply.
+
+Training data is distributed separately. Its component licenses and attribution
+are listed in the dataset repository; this code license does not relicense
+third-party datasets or images.

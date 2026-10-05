@@ -1,0 +1,192 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+_target_: verl.workers.config.HFModelConfig
+
+# path to the huggingface model
+path: ~/models/deepseek-llm-7b-chat
+
+# config to the huggingface config. In case it is not the same as path
+hf_config_path: null
+
+# path to the huggingface tokenizer. In case it is not the same as path
+tokenizer_path: null
+
+# Explicit minimum image pixels passed to every actor/teacher/data processor.
+processor_min_pixels: null
+
+# Probe-selected immutable maximum image pixels passed to every processor.
+processor_max_pixels: null
+
+# whether to use shared memory for model loading
+use_shm: False
+
+# whether to trust remote code.
+trust_remote_code: False
+
+# custom chat template for the model
+custom_chat_template: null
+
+# path to a custom chat template file for the model
+custom_chat_template_file: null
+
+# whether to use external libs for the model
+external_lib: null
+
+# override hf config
+override_config: {}
+
+# whether to enable gradient checkpointing. Only valid when we use hf model definition
+enable_gradient_checkpointing: True
+
+# whether to enable activation offload. Only valid when we use hf model definition
+enable_activation_offload: False
+
+# whether to use remove padding. Only valid when we use hf model definition
+use_remove_padding: True
+
+# Set to positive value to enable LoRA (e.g., 32)
+lora_rank: 0
+
+# LoRA scaling factor
+lora_alpha: 16
+
+# Target modules for LoRA adaptation
+target_modules: all-linear
+
+# Exclude modules from LoRA adaptation
+exclude_modules: null
+
+# Path to pre-trained LoRA adapter to load for continued training
+lora_adapter_path: null
+
+# whether to use liger. Only valid when we use hf model definition
+use_liger: False
+
+# whether to use fused kernels.
+use_fused_kernels: False
+
+# fused kernel options.
+fused_kernel_options:
+
+  # the implementation backend for fused kernels.
+  impl_backend: torch
+
+# TiledMLP configuration for memory-efficient MLP computation.
+# Reduces peak memory by processing MLP forward/backward in tiles.
+tiled_mlp:
+
+  # whether to enable TiledMLP
+  enabled: False
+
+  # number of shards to split the input. Higher values reduce peak memory but may slightly impact performance.
+  num_shards: 4
+
+# Visual token projector for low-token student VLM training.
+vision_token_projector:
+
+  # whether to enable the student-side visual token projector
+  enabled: False
+
+  # number of visual tokens kept per image after ViT
+  num_tokens: 64
+
+  # hidden expansion ratio for the projector MLP
+  mlp_ratio: 2.0
+
+# Sixth-release HoliTom-inspired, parameter-free spatial DPC merge after the
+# native Qwen merger.  Legacy V4 launchers must explicitly override every
+# CDPruner field they consume; keeping those fields null here prevents a V6
+# compose from silently carrying conditional-pruning semantics into DPC.
+vision_token_compressor:
+
+  enabled: False
+
+  algorithm: qwen35_holitom_dpc_spatial_merge_v1
+
+  method: holitom_inspired_dpc_diversity_merge
+
+  paper_url: https://proceedings.neurips.cc/paper_files/paper/2025/file/c573258c38d0a3919d8c1364053c45df-Paper-Conference.pdf
+
+  official_repo: cokeshao/HoliTom
+
+  official_repo_revision: e9b2972f6895c9e7d7fe74eb8c3a2ecaab8056e0
+
+  adaptation_scope: single_image_dpc_only_qwen35_post_native_merger_pre_llm_exact_budget
+
+  original_method_reproduction_claim_allowed: False
+
+  route_schema_version: vision_opd_holitom_dpc_merge_route_v1
+
+  transport_key: dpc_merge_routes
+
+  placement: post_native_merger_pre_llm
+
+  budget_policy: per_image_min_N_max_32_ceil_0.05N
+
+  retention_ratio: 0.05
+
+  minimum_tokens_per_image: 32
+
+  distance: euclidean_div_sqrt_hidden_dim_fp32
+
+  distance_chunk_tokens: 256
+
+  routing_autograd: detached_no_grad_fp32
+
+  knn_k: 7
+
+  center_score: density_times_holitom_per_token_max_or_nearest_higher_delta
+
+  assignment: nearest_center_euclidean_stable_original_index_tie
+
+  reduction: differentiable_arithmetic_mean_of_original_embeddings
+
+  position_policy: inherit_center_original_three_axis_mrope_no_rebase
+
+  query_conditioned: False
+
+  attention_conditioned: False
+
+  bbox_conditioned: False
+
+  persistent_n_by_n_matrix_forbidden: True
+
+  # Conditional-pruning-only fields are intentionally null in V6.
+  kernel_jitter: null
+
+  relevance_epsilon: null
+
+  residual_epsilon: null
+
+
+  selector_dtype: null
+
+  merge: null
+
+  query_policy: null
+
+  relevance_fraction: null
+
+  candidate_multiplier: null
+
+  query_weight: null
+
+  attention_weight: null
+
+  bbox_weight: null
+
+  deterministic: True
+
+  # Versioned data manifest whose content hashes are checkpointed and verified.
+  data_manifest_path: null
+
+  # Explicit incompatible materialized-data schema. Null preserves archived
+  # release-04 behavior; formal release 06 binds its VQA20K manifest schema.
+  data_manifest_schema: null
+
+# Legacy: train only native merger beside LoRA. Full-parameter: explicitly include it with language+ViT.
+train_native_visual_merger: False

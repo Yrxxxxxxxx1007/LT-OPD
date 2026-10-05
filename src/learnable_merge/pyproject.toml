@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lt-opd-learnable-merge"
+version = "0.3.0"
+description = "LT-OPD with learnable visual node aggregation"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+dependencies = [
+  "huggingface_hub==1.9.0",
+  "datasets==4.4.2",
+  "pyarrow==22.0.0",
+  "numpy==1.26.4",
+  "pandas==2.3.3",
+  "Pillow==12.0.0",
+  "PyYAML==6.0.3",
+]
+
+[project.optional-dependencies]
+train = [
+  "torch==2.10.0",
+  "torchvision==0.25.0",
+  "transformers==5.5.0",
+  "accelerate==1.12.0",
+  "ray[default]==2.53.0",
+  "hydra-core==1.3.2",
+  "omegaconf==2.3.0",
+  "tensordict==0.10.0",
+  "torchdata==0.11.0",
+  "flash-linear-attention==0.4.2",
+  "fla-core==0.4.2",
+  "einops==0.8.2",
+  "safetensors==0.7.0",
+  "peft==0.18.0",
+  "sentencepiece==0.2.1",
+  "protobuf==6.33.6",
+  "packaging==25.0",
+  "orjson>=3.10",
+  "psutil==7.1.3",
+  "dill==0.4.0",
+  "codetiming==1.4.0",
+  "qwen-vl-utils==0.0.14",
+]
+eval = [
+  "torch==2.10.0",
+  "torchvision==0.25.0",
+  "transformers==5.5.0",
+  "accelerate==1.12.0",
+  "ray[default]==2.53.0",
+  "tensordict==0.10.0",
+  "hydra-core==1.3.2",
+  "omegaconf==2.3.0",
+  "flash-linear-attention==0.4.2",
+  "fla-core==0.4.2",
+  "einops==0.8.2",
+  "safetensors==0.7.0",
+  "scikit-learn==1.7.2",
+  "codetiming==1.4.0",
+  "qwen-vl-utils==0.0.14",
+]
+
+[project.urls]
+Repository = "https://github.com/Yrxxxxxxxx1007/LT-OPD"
+Paper = "https://arxiv.org/abs/2609.32353"
+Model = "https://huggingface.co/yyy051007/LT-OPD-learnable-merge"
+
+[project.scripts]
+lt-opd-merge-train = "training.train:main"
+lt-opd-merge-export = "training.export:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["verl*", "training*"]
+
+[tool.setuptools.package-data]
+training = ["*.yaml", "*.json", "*.jinja", "*.sh"]
+verl = ["py.typed", "version/version", "trainer/runtime_env.yaml", "trainer/config/**/*.yaml", "trainer/config/*.yaml"]
