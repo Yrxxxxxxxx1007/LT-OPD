@@ -16,7 +16,7 @@
    target="_blank"
    rel="noopener noreferrer"
    style="text-decoration: none;">
-  <img src="https://img.shields.io/badge/Project-Page-8A2BE2?logo=googlechrome&logoColor=white"
+  <img src="https://img.shields.io/badge/Project-Page-7B718D?logo=googlechrome&logoColor=white"
        alt="Project Page">
 </a>
 </div>  
