@@ -12,6 +12,13 @@
     <img src="https://img.shields.io/badge/Paper-arXiv-red?logo=arxiv&logoSvg">
   </a>
 <a href="https://github.com/Yrxxxxxxxx1007/LT-OPD/stargazers" target='_blank' style="text-decoration: none;"><img src="https://img.shields.io/github/stars/Yrxxxxxxxx1007/LT-OPD"></a>
+<a href="https://lijunxian111.github.io/lt-opd-project/"
+   target="_blank"
+   rel="noopener noreferrer"
+   style="text-decoration: none;">
+  <img src="https://img.shields.io/badge/Project-Page-8A2BE2?logo=googlechrome&logoColor=white"
+       alt="Project Page">
+</a>
 </div>  
 
 [Project](https://github.com/Yrxxxxxxxx1007/LT-OPD) · [Training data](https://huggingface.co/datasets/yyy051007/LT-OPD-14K) · [Evaluation](src/evaluation/README.md) · [Checkpoints](src/learnable_merge)  
